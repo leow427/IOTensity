@@ -96,7 +96,7 @@ test('browser preview: overflowing cards, keyboard selection and zero-brightness
   ).toHaveAttribute('aria-pressed', 'true');
 });
 
-test('browser preview: renders WebGL without application errors', async ({
+test('browser preview: renders WebGL and orbits without changing room data', async ({
   page,
 }) => {
   const errors: string[] = [];
@@ -113,5 +113,28 @@ test('browser preview: renders WebGL without application errors', async ({
         (element) => !!(element as HTMLCanvasElement).getContext('webgl2'),
       ),
   ).toBe(true);
+  await page.getByRole('button', { name: /Save Room/ }).click();
+  await page.getByRole('button', { name: 'Clear light selection' }).click();
+  const canvas = page.locator('canvas');
+  const baseline = await canvas.screenshot();
+  const bounds = (await canvas.boundingBox())!;
+  const start = {
+    x: bounds.x + bounds.width * 0.82,
+    y: bounds.y + bounds.height * 0.68,
+  };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x + 55, start.y - 35, { steps: 8 });
+  await page.mouse.up();
+  expect((await canvas.screenshot()).equals(baseline)).toBe(false);
+  await expect(page.getByRole('status')).not.toContainText('UNSAVED');
+  await page
+    .getByRole('button', { name: 'Select Light 1', exact: true })
+    .click();
+  await expect(
+    page.getByLabel('Left / right coordinate', { exact: true }),
+  ).toHaveValue('-1.7');
+  await page.getByRole('button', { name: 'Reset room view' }).click();
+  await expect(page.getByRole('status')).not.toContainText('UNSAVED');
   expect(errors).toEqual([]);
 });

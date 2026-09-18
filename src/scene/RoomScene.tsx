@@ -150,11 +150,11 @@ function CameraControl({
   resetKey: number;
 }) {
   const { camera, gl, size } = useThree();
-  const controls = useMemo(
-    () => new OrbitControls(camera, gl.domElement),
-    [camera, gl],
-  );
+  const controls = useMemo(() => new OrbitControls(camera), [camera]);
   useEffect(() => {
+    // Bind listeners in the effect so React's development remounts reconnect
+    // cleanly, without side effects from a discarded render.
+    controls.connect(gl.domElement);
     controls.target.set(0, 0.9, 1.15);
     controls.enablePan = false;
     controls.enableDamping = true;
@@ -166,7 +166,7 @@ function CameraControl({
     controls.minZoom = 34;
     controls.maxZoom = 130;
     return () => controls.dispose();
-  }, [controls]);
+  }, [controls, gl]);
   useEffect(() => {
     controls.enabled = !dragging;
   }, [controls, dragging]);
