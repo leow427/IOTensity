@@ -3,6 +3,7 @@ import { colorCss, mixColor, resolveColor } from '../domain/colors';
 import type { EditMode, VirtualLight } from '../domain/model';
 import { useStore } from '../state/context';
 import { Icon, LightIcon } from './Icons';
+import { PhysicalStatus } from './PhysicalLights';
 
 export function LightCards({
   lights,
@@ -21,14 +22,12 @@ export function LightCards({
   useEffect(() => {
     let frame = 0;
     const paint = () => {
-      const state = store.getSnapshot();
       for (const light of lights) {
         const element = elements.current.get(light.id);
         if (!element) continue;
         const rgb = resolveColor(
           light,
-          store.simulation.getColor(light.id),
-          state.preferences.brightness,
+          store.output.getColor(light.id),
           editable && light.id === selectedId ? mode : undefined,
         );
         element.style.setProperty('--light-color', colorCss(rgb));
@@ -55,7 +54,13 @@ export function LightCards({
     <div
       className={`light-cards ${editable ? '' : 'light-cards-compact'}`}
       ref={row}
-      aria-label={editable ? 'Virtual lights' : 'Saved virtual lights'}
+      aria-label={
+        lights[0]?.output.kind === 'esp32'
+          ? 'Physical lights'
+          : editable
+            ? 'Virtual lights'
+            : 'Saved virtual lights'
+      }
       role="group"
     >
       {lights.map((light, index) => {
@@ -73,9 +78,14 @@ export function LightCards({
             </span>
             <LightIcon kind={light.iconKind} />
             <span className="card-name">{light.name}</span>
+            <PhysicalStatus light={light} />
             {editable && (
               <span className="card-detail mono">
-                {selectedId === light.id ? 'SELECTED' : 'VIRTUAL LIGHT'}
+                {selectedId === light.id
+                  ? 'SELECTED'
+                  : light.output.kind === 'virtual'
+                    ? 'VIRTUAL LIGHT'
+                    : 'PHYSICAL LIGHT'}
               </span>
             )}
           </>

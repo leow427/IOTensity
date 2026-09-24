@@ -8,3 +8,5 @@ playwright-report/
 .DS_Store
 *.local
 *.tsbuildinfo
+firmware/esp32/.pio/
+__pycache__/

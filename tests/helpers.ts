@@ -4,7 +4,7 @@ import {
   type Configuration,
 } from '../src/domain/model';
 import type { Persistence } from '../src/persistence/client';
-import type { AnimationClock } from '../src/simulation/engine';
+import { NativeSyncOutput, type SyncSnapshot } from '../src/sync/output';
 
 export class MemoryPersistence implements Persistence {
   readonly kind = 'native' as const;
@@ -28,34 +28,46 @@ export class MemoryPersistence implements Persistence {
     this.config = { ...clone(config), revision: expectedRevision + 1 };
     // Match Rust's field order, which is intentionally different from createLight.
     this.config.rooms.forEach((room) => {
-      room.lights = room.lights.map(({ id, name, position, iconKind }) => ({
-        id,
-        name,
-        position,
-        iconKind,
-      }));
+      room.lights = room.lights.map(
+        ({ id, name, position, iconKind, output }) => ({
+          id,
+          name,
+          position,
+          iconKind,
+          output,
+        }),
+      );
     });
     return clone(this.config);
   }
 }
-export class FakeClock implements AnimationClock {
-  time = 0;
-  next = 0;
-  callbacks = new Map<number, (time: number) => void>();
-  now = () => this.time;
-  request = (callback: (time: number) => void) => {
-    const id = ++this.next;
-    this.callbacks.set(id, callback);
-    return id;
-  };
-  cancel = (id: number) => {
-    this.callbacks.delete(id);
-  };
-  advance(ms: number) {
-    this.time += ms;
-    const callbacks = [...this.callbacks.values()];
-    this.callbacks.clear();
-    callbacks.forEach((callback) => callback(this.time));
+export class FakeOutput extends NativeSyncOutput {
+  constructor() {
+    let snapshot: SyncSnapshot = {
+      sequence: 0,
+      source: 'test',
+      status: 'stopped',
+      message: 'Ready',
+      colors: [],
+    };
+    super(true, {
+      listen: async () => () => {},
+      invoke: async <T>(command: string) => {
+        if (command === 'start_sync')
+          snapshot = {
+            ...snapshot,
+            sequence: snapshot.sequence + 1,
+            status: 'running',
+          };
+        if (command === 'stop_sync')
+          snapshot = {
+            ...snapshot,
+            sequence: snapshot.sequence + 1,
+            status: 'stopped',
+          };
+        return snapshot as T;
+      },
+    });
   }
 }
 export function deferred() {

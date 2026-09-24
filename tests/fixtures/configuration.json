@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "revision": 0,
   "rooms": [
     {
@@ -9,29 +9,61 @@
         {
           "id": "light-bulb",
           "name": "Desk left",
-          "position": { "x": -2, "y": 1.2, "z": 0.5 },
-          "iconKind": "bulb"
+          "position": {
+            "x": -2,
+            "y": 1.2,
+            "z": 0.5
+          },
+          "iconKind": "bulb",
+          "output": {
+            "kind": "virtual"
+          }
         },
         {
           "id": "light-bar",
           "name": "Monitor",
-          "position": { "x": 0, "y": 1.4, "z": 0 },
-          "iconKind": "bar"
+          "position": {
+            "x": 0,
+            "y": 1.4,
+            "z": 0
+          },
+          "iconKind": "bar",
+          "output": {
+            "kind": "virtual"
+          }
         },
         {
           "id": "light-strip",
           "name": "Desk strip",
-          "position": { "x": 1, "y": 0.8, "z": 1 },
-          "iconKind": "strip"
+          "position": {
+            "x": 1,
+            "y": 0.8,
+            "z": 1
+          },
+          "iconKind": "strip",
+          "output": {
+            "kind": "virtual"
+          }
         },
         {
           "id": "light-lamp",
           "name": "Corner",
-          "position": { "x": 2.2, "y": 2, "z": 3 },
-          "iconKind": "lamp"
+          "position": {
+            "x": 2.2,
+            "y": 2,
+            "z": 3
+          },
+          "iconKind": "lamp",
+          "output": {
+            "kind": "esp32",
+            "deviceId": "esp32-aabbcca1b2c3"
+          }
         }
       ]
     }
   ],
-  "preferences": { "brightness": 75, "intensity": "balanced" }
+  "preferences": {
+    "brightness": 75,
+    "intensity": "balanced"
+  }
 }

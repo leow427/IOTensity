@@ -1,44 +1,30 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { INTENSITIES } from '../domain/model';
 import { useAppState, useStore } from '../state/context';
 import { RoomScene } from '../scene/RoomScene';
 import { Icon, IntensityIcon } from './Icons';
 import { LightCards } from './LightCards';
+import { OverlayControl } from './OverlayControl';
 
 const INTENSITY_COPY = {
-  subtle: 'Slow transitions. A softer atmosphere.',
-  balanced: 'Smooth, natural transitions. Just enough energy.',
-  vivid: 'Quick transitions. A more expressive room.',
-  punch: 'Immediate transitions. Every color, amplified.',
+  subtle: '1.8 s smoothing. Slow, soft transitions.',
+  balanced: '800 ms smoothing. Gentle, natural transitions.',
+  vivid: '300 ms smoothing. Quick, expressive transitions.',
+  punch: '80 ms smoothing. Fastest response to the screen.',
 };
 
 function TransportDisplay() {
-  const store = useStore();
   const state = useAppState();
-  const timer = useRef<HTMLSpanElement>(null);
-  useEffect(() => {
-    let frame = 0;
-    const update = () => {
-      const seconds = Math.floor(store.simulation.time);
-      if (timer.current)
-        timer.current.textContent = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
-      frame = requestAnimationFrame(update);
-    };
-    update();
-    return () => cancelAnimationFrame(frame);
-  }, [store]);
   return (
     <div className="transport-display">
       <div>
         <span className={`status-dot ${state.running ? 'active' : ''}`} />
-        <span className="mono">
-          {state.running ? 'IN MOTION' : 'STANDING BY'}
-        </span>
+        <span className="mono">{state.syncStatus.toUpperCase()}</span>
       </div>
-      <span ref={timer} className="timecode">
-        00:00
+      <span className="timecode">SCREEN SYNC</span>
+      <span className="display-bottom mono">
+        NATIVE COLOR / SAVED POSITIONS
       </span>
-      <span className="display-bottom mono">SYNTHETIC COLOR / INTERNAL</span>
     </div>
   );
 }
@@ -61,8 +47,8 @@ export function SyncPage() {
         <div className="mode-tag">
           <span className="mode-symbol">S</span>
           <div>
-            <strong>Simulated mode</strong>
-            <span>Synthetic color, real possibilities.</span>
+            <strong>Screen sync</strong>
+            <span>Virtual and physical outputs.</span>
           </div>
         </div>
       </header>
@@ -88,9 +74,9 @@ export function SyncPage() {
             </div>
             <div className="scene-bottomline">
               <span className="mono">
-                {state.running ? 'SIMULATION RUNNING' : 'SAVED ROOM'}
+                {state.running ? 'SYNC RUNNING' : 'SAVED ROOM'}
                 <i />
-                {String(room.lights.length).padStart(2, '0')} VIRTUAL LIGHTS
+                {String(room.lights.length).padStart(2, '0')} LIGHTS
               </span>
               <span className="preview-corner-mark">⌖</span>
             </div>
@@ -124,7 +110,23 @@ export function SyncPage() {
               </button>
             </div>
             {room.lights.length ? (
-              <LightCards lights={room.lights} />
+              <>
+                {(['virtual', 'esp32'] as const).map((kind) => {
+                  const lights = room.lights.filter(
+                    (light) => light.output.kind === kind,
+                  );
+                  return lights.length ? (
+                    <div className="output-group" key={kind}>
+                      <h3 className="eyebrow mono">
+                        {kind === 'virtual'
+                          ? 'VIRTUAL PREVIEW'
+                          : 'PHYSICAL LIGHTS'}
+                      </h3>
+                      <LightCards lights={lights} />
+                    </div>
+                  ) : null;
+                })}
+              </>
             ) : (
               <div className="empty-output">
                 <span className="output-dashes">
@@ -143,16 +145,59 @@ export function SyncPage() {
             <span>LIGHT ENGINE</span>
             <span>01 — S</span>
           </div>
+          <label className="field-label" htmlFor="sync-source">
+            Source
+          </label>
+          <select
+            id="sync-source"
+            className="source-select"
+            value={state.syncSource}
+            disabled={
+              state.syncBusy ||
+              ['starting', 'running', 'stopping'].includes(state.syncStatus)
+            }
+            onChange={(event) =>
+              store.setSyncSource(
+                event.target.value as 'simulation' | 'test' | 'display',
+              )
+            }
+          >
+            <option value="simulation">Synthetic color simulation</option>
+            <option value="test">Deterministic test image</option>
+            <option value="display">Main macOS display</option>
+          </select>
           <TransportDisplay />
+          <p
+            className="sync-status"
+            role={state.syncStatus === 'error' ? 'alert' : undefined}
+            aria-live="polite"
+          >
+            {store.output.available
+              ? state.syncMessage
+              : 'Desktop app required for native screen sync. Browser preview is editor-only.'}
+          </p>
           <button
             className={`start-button ${state.running ? 'is-running' : ''}`}
-            disabled={!room.lights.length}
-            onClick={() => (state.running ? store.stop() : store.start())}
+            disabled={
+              !room.lights.length ||
+              !store.output.available ||
+              state.syncBusy ||
+              state.syncStatus === 'stopping'
+            }
+            onClick={() =>
+              void (state.running || state.syncStatus === 'starting'
+                ? store.stop()
+                : store.start())
+            }
           >
             <span className="start-icon">
               <Icon name={state.running ? 'stop' : 'play'} size={21} />
             </span>
-            <span>{state.running ? 'Stop Sync' : 'Start Sync'}</span>
+            <span>
+              {state.running || state.syncStatus === 'starting'
+                ? 'Stop Sync'
+                : 'Start Sync'}
+            </span>
             <span className="button-led" />
           </button>
           <div className="control-divider" />
@@ -188,7 +233,18 @@ export function SyncPage() {
             <span>FULL</span>
           </div>
           <div className="control-divider" />
-          <fieldset className="intensity-control">
+          <p className="sync-note">
+            {state.syncSource === 'simulation'
+              ? 'Animated colors for virtual and physical light testing.'
+              : state.syncSource === 'test'
+                ? 'Test image: red / green above, blue / white below.'
+                : 'Play content on your main display. Open the mini room to watch your lights respond.'}{' '}
+            Save light positions to change their sampled areas.
+          </p>
+          <fieldset
+            className="intensity-control"
+            disabled={state.syncSource !== 'simulation'}
+          >
             <legend>Intensity</legend>
             <div className="intensity-options">
               {INTENSITIES.map((intensity) => (
@@ -204,22 +260,28 @@ export function SyncPage() {
                 </button>
               ))}
             </div>
-            <p>{INTENSITY_COPY[state.preferences.intensity]}</p>
+            <p>
+              {state.syncSource === 'simulation'
+                ? INTENSITY_COPY[state.preferences.intensity]
+                : 'Screen and test-image colors update directly, without animation smoothing.'}
+            </p>
           </fieldset>
+
+          <OverlayControl />
           <div className="control-bottom">
             <div className="speaker-grille" aria-hidden="true" />
             <span className="mono">
               IOTENSITY
               <br />
-              VIRTUAL LIGHT INSTRUMENT
+              LOCAL LIGHT INSTRUMENT
             </span>
           </div>
         </aside>
       </div>
       <footer className="page-footer">
         <span>
-          <Icon name="info" size={14} />A color simulation. No screen capture or
-          connected devices.
+          <Icon name="info" size={14} />
+          Saved X/Y positions map to the screen. Depth does not affect sampling.
         </span>
         <span className="mono">
           {state.preferenceSaving

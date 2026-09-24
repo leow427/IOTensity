@@ -4,9 +4,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/App';
 import { StoreProvider } from '../src/state/context';
 import { AppStore } from '../src/state/store';
+import type { HardwareClient, DevicesSnapshot } from '../src/hardware/client';
 import type { Room } from '../src/domain/model';
-import { FakeClock, MemoryPersistence } from './helpers';
-import { Simulation } from '../src/simulation/engine';
+import { FakeOutput, MemoryPersistence } from './helpers';
 
 // Component tests exercise accessible UI and the real store; 3D rendering is
 // verified separately in the browser and native app, not claimed by this mock.
@@ -23,9 +23,9 @@ vi.mock('../src/scene/RoomScene', () => ({
 }));
 
 const stores: AppStore[] = [];
-async function setup() {
+async function setup(hardware?: HardwareClient) {
   const persistence = new MemoryPersistence();
-  const store = new AppStore(persistence, new Simulation(new FakeClock()));
+  const store = new AppStore(persistence, new FakeOutput(), hardware);
   stores.push(store);
   await store.load();
   render(
@@ -133,5 +133,103 @@ describe('room editing UI', () => {
     expect(
       screen.getByRole('button', { name: 'Select Light 1' }),
     ).toBeInTheDocument();
+  });
+});
+
+describe('physical light UI', () => {
+  it('adds a physical light with its plus button, identifies it, and keeps the virtual row separate when offline', async () => {
+    let receive!: (snapshot: DevicesSnapshot) => void;
+    const device = {
+      deviceId: 'esp32-020000a1b2c3',
+      shortId: 'IOT-A1B2C3',
+      model: 'esp32-rgb',
+      online: true,
+      streaming: false,
+      message: 'Online',
+      boundLightId: null,
+    };
+    const identify = vi.fn(async () => {});
+    const { user, store } = await setup({
+      available: true,
+      identify,
+      dispose() {},
+      async connect(listener) {
+        receive = listener;
+        receive({ devices: [device], discoveryError: null });
+      },
+    });
+    await user.click(screen.getByRole('button', { name: 'Your Rooms 02' }));
+    await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
+    await user.click(
+      screen.getByRole('button', { name: 'Add physical light' }),
+    );
+    const dialog = screen.getByRole('dialog');
+    await user.click(
+      within(dialog).getByRole('button', { name: 'Identify IOT-A1B2C3' }),
+    );
+    expect(identify).toHaveBeenCalledWith(device.deviceId);
+    await user.click(within(dialog).getByRole('button', { name: 'Add light' }));
+    expect(
+      within(
+        screen.getByRole('group', { name: 'Virtual lights' }),
+      ).getAllByRole('button'),
+    ).toHaveLength(1);
+    const row = screen.getByRole('group', { name: 'Physical lights' });
+    expect(within(row).getAllByRole('button')).toHaveLength(1);
+    expect(store.getSnapshot().draft!.lights[1].id).not.toBe(device.deviceId);
+    await user.click(screen.getByRole('button', { name: /Save Room/ }));
+    act(() =>
+      receive({
+        devices: [{ ...device, online: false }],
+        discoveryError: null,
+      }),
+    );
+    expect(row).toHaveTextContent('Offline');
+    expect(store.dirty).toBe(false);
+    await user.click(
+      screen.getByRole('button', { name: 'Add physical light' }),
+    );
+    expect(
+      within(screen.getByRole('dialog')).getByRole('button', {
+        name: 'Assigned',
+      }),
+    ).toBeDisabled();
+  });
+  it('binds an existing room light while retaining its logical ID', async () => {
+    const device = {
+      deviceId: 'esp32-020000a1b2c3',
+      shortId: 'IOT-A1B2C3',
+      model: 'esp32-rgb',
+      online: true,
+      streaming: false,
+      message: 'Online',
+      boundLightId: null,
+    };
+    const { user, store } = await setup({
+      available: true,
+      async identify() {},
+      dispose() {},
+      async connect(receive) {
+        receive({ devices: [device], discoveryError: null });
+      },
+    });
+    await user.click(screen.getByRole('button', { name: 'Your Rooms 02' }));
+    await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
+    const logicalId = store.getSnapshot().selectedLightId;
+    await user.click(
+      screen.getByRole('button', { name: 'Bind physical light' }),
+    );
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', {
+        name: 'Bind light',
+      }),
+    );
+    expect(store.getSnapshot().draft!.lights[0]).toMatchObject({
+      id: logicalId,
+      output: { kind: 'esp32', deviceId: device.deviceId },
+    });
+    expect(
+      screen.queryByRole('group', { name: 'Virtual lights' }),
+    ).not.toBeInTheDocument();
   });
 });

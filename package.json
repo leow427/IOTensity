@@ -7,14 +7,16 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "tauri": "tauri",
+    "tauri": "node scripts/tauri.js",
     "typecheck": "tsc -b",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
+    "test:firmware": "sh scripts/test-firmware.sh",
     "test:e2e": "playwright test",
-    "check": "npm run format:check && npm run lint && npm run typecheck && npm test"
+    "test:tooling": "node --test scripts/*.test.js",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run test:tooling"
   },
   "dependencies": {
     "@react-three/fiber": "^9.3.0",

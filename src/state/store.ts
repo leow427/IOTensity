@@ -11,9 +11,22 @@ import {
   type Position,
   type Preferences,
   type Room,
+  validDeviceId,
+  shortDeviceId,
 } from '../domain/model';
 import { errorMessage, type Persistence } from '../persistence/client';
-import { Simulation } from '../simulation/engine';
+import {
+  NativeSyncOutput,
+  type SyncOutput,
+  type SyncSource,
+  type SyncStatus,
+} from '../sync/output';
+
+import {
+  NativeHardwareClient,
+  type HardwareClient,
+  type Device,
+} from '../hardware/client';
 
 export type Page = 'sync' | 'rooms';
 export type Destination = Page | 'close' | 'discard';
@@ -31,6 +44,14 @@ export type AppState = {
   preferenceError: string | null;
   preferenceSaving: boolean;
   running: boolean;
+  devices: Device[];
+  discoveryError: string | null;
+  hardwareError: string | null;
+  identifying: string | null;
+  syncSource: SyncSource;
+  syncStatus: SyncStatus;
+  syncMessage: string;
+  syncBusy: boolean;
   reducedMotion: boolean;
   pending: Destination | null;
   readyToClose: boolean;
@@ -51,6 +72,14 @@ export class AppStore {
     preferenceError: null,
     preferenceSaving: false,
     running: false,
+    devices: [],
+    discoveryError: null,
+    hardwareError: null,
+    identifying: null,
+    syncSource: 'simulation',
+    syncStatus: 'stopped',
+    syncMessage: 'Ready to start.',
+    syncBusy: false,
     reducedMotion: false,
     pending: null,
     readyToClose: false,
@@ -63,8 +92,21 @@ export class AppStore {
 
   constructor(
     readonly persistence: Persistence,
-    readonly simulation = new Simulation(),
-  ) {}
+    readonly output: SyncOutput = new NativeSyncOutput(),
+    readonly hardware: HardwareClient = new NativeHardwareClient(),
+  ) {
+    output.subscribe(() => {
+      const snapshot = output.getSnapshot();
+      this.set({
+        running: snapshot.status === 'running',
+        syncStatus: snapshot.status,
+        syncMessage: snapshot.message,
+        ...(['starting', 'running'].includes(snapshot.status)
+          ? { syncSource: snapshot.source }
+          : {}),
+      });
+    });
+  }
   getSnapshot = () => this.state;
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
@@ -100,7 +142,16 @@ export class AppStore {
         preferences: clone(saved.preferences),
         selectedLightId: null,
       });
-      this.configureSimulation();
+      void this.hardware
+        .connect(({ devices, discoveryError }) =>
+          this.set({ devices, discoveryError }),
+        )
+        .catch((error) => this.set({ discoveryError: errorMessage(error) }));
+      try {
+        await this.output.connect();
+      } catch (error) {
+        this.set({ syncStatus: 'error', syncMessage: errorMessage(error) });
+      }
     } catch (error) {
       this.set({ phase: 'error', loadError: errorMessage(error) });
     }
@@ -114,6 +165,79 @@ export class AppStore {
     if (!room || !this.canEdit || room.lights.length >= MAX_LIGHTS) return;
     const light = createLight(room);
     this.edit({ ...room, lights: [...room.lights, light] }, light.id);
+  }
+  private deviceAlreadyBound(deviceId: string, exceptId?: string) {
+    const lights = [
+      ...(this.state.draft?.lights ?? []),
+      ...(this.state.saved?.rooms.slice(1).flatMap((r) => r.lights) ?? []),
+    ];
+    return lights.some(
+      (light) =>
+        light.id !== exceptId &&
+        light.output.kind === 'esp32' &&
+        light.output.deviceId === deviceId,
+    );
+  }
+  bindLight(id: string, deviceId: string | null): boolean {
+    const room = this.state.draft;
+    if (!room || !this.canEdit || !room.lights.some((light) => light.id === id))
+      return false;
+    if (
+      deviceId !== null &&
+      (!validDeviceId(deviceId) || this.deviceAlreadyBound(deviceId, id))
+    ) {
+      this.set({
+        hardwareError:
+          'This hardware ID is invalid or already assigned to another light.',
+      });
+      return false;
+    }
+    this.edit({
+      ...room,
+      lights: room.lights.map((light) =>
+        light.id === id
+          ? {
+              ...light,
+              output: deviceId
+                ? { kind: 'esp32', deviceId }
+                : { kind: 'virtual' },
+            }
+          : light,
+      ),
+    });
+    this.set({ hardwareError: null });
+    return true;
+  }
+  addPhysicalLight(deviceId: string): boolean {
+    const room = this.state.draft;
+    if (!room || !this.canEdit || room.lights.length >= MAX_LIGHTS)
+      return false;
+    if (!validDeviceId(deviceId) || this.deviceAlreadyBound(deviceId)) {
+      this.set({
+        hardwareError:
+          'This hardware ID is invalid or already assigned to another light.',
+      });
+      return false;
+    }
+    const light = {
+      ...createLight(room),
+      name: shortDeviceId(deviceId),
+      output: { kind: 'esp32' as const, deviceId },
+    };
+    this.edit({ ...room, lights: [...room.lights, light] }, light.id);
+    this.set({ hardwareError: null });
+    return true;
+  }
+  async identifyDevice(deviceId: string) {
+    if (this.state.identifying) return;
+    this.set({ identifying: deviceId, hardwareError: null });
+    try {
+      await this.hardware.identify(deviceId);
+    } catch (error) {
+      this.set({ hardwareError: errorMessage(error) });
+    } finally {
+      this.set({ identifying: null });
+    }
   }
   selectLight(id: string | null) {
     if (
@@ -195,7 +319,6 @@ export class AppStore {
       );
       validateConfiguration(result);
       this.set({ saved: result });
-      this.configureSimulation();
     });
     this.writes = task.catch(() => undefined);
     return task;
@@ -225,7 +348,7 @@ export class AppStore {
         Math.min(100, Math.round(patch.brightness)),
       );
     this.set({ preferences, preferenceError: null });
-    this.configureSimulation();
+
     if (this.preferenceTimer) clearTimeout(this.preferenceTimer);
     this.preferenceTimer = setTimeout(() => {
       this.preferenceTimer = null;
@@ -257,30 +380,45 @@ export class AppStore {
       this.set({ preferenceSaving: this.pendingPreferenceWrites > 0 });
     }
   }
-  private configureSimulation() {
-    const ids =
-      this.state.saved?.rooms.flatMap((room) =>
-        room.lights.map((light) => light.id),
-      ) ?? [];
-    this.simulation.configure(
-      ids,
-      this.state.preferences.intensity,
-      this.state.reducedMotion,
-    );
-    if (!ids.length) this.stop();
-  }
   setReducedMotion(reducedMotion: boolean) {
     this.set({ reducedMotion });
-    this.configureSimulation();
   }
-  start() {
-    if (!this.state.saved?.rooms.some((room) => room.lights.length)) return;
-    this.simulation.start();
-    this.set({ running: this.simulation.isRunning });
+  setSyncSource(syncSource: SyncSource) {
+    if (
+      this.state.syncBusy ||
+      ['starting', 'running', 'stopping'].includes(this.state.syncStatus)
+    )
+      return;
+    this.set({ syncSource });
   }
-  stop() {
-    this.simulation.stop();
-    this.set({ running: false });
+  async start() {
+    if (this.state.syncBusy || !this.state.saved?.rooms[0].lights.length)
+      return;
+    this.set({ syncBusy: true });
+    try {
+      await this.output.start(this.state.syncSource, this.state.reducedMotion);
+    } catch (error) {
+      this.set({
+        syncStatus: 'error',
+        syncMessage: typeof error === 'string' ? error : errorMessage(error),
+      });
+    } finally {
+      this.set({ syncBusy: false });
+    }
+  }
+  async stop() {
+    if (this.state.syncBusy) return;
+    this.set({ syncBusy: true });
+    try {
+      await this.output.stop();
+    } catch (error) {
+      this.set({
+        syncStatus: 'error',
+        syncMessage: typeof error === 'string' ? error : errorMessage(error),
+      });
+    } finally {
+      this.set({ syncBusy: false });
+    }
   }
 
   async requestTransition(destination: Destination) {
@@ -318,7 +456,8 @@ export class AppStore {
   dispose() {
     this.disposed = true;
     if (this.preferenceTimer) clearTimeout(this.preferenceTimer);
-    this.simulation.dispose();
+    this.output.dispose();
+    this.hardware.dispose();
     this.listeners.clear();
   }
 }
