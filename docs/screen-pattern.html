@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IOTensity display capture check</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font: 16px system-ui;
+      }
+      main {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        grid-template-rows: 1fr 1fr;
+      }
+      section {
+        display: grid;
+        place-items: center;
+        font-size: 28px;
+        font-weight: 650;
+      }
+      nav {
+        position: fixed;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        padding: 12px;
+        border-radius: 10px;
+        background: #242824;
+        color: white;
+        text-align: center;
+      }
+      p {
+        margin: 0 0 10px;
+      }
+      button {
+        padding: 10px 14px;
+        margin: 3px;
+        cursor: pointer;
+        border-radius: 6px;
+        border: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <main aria-label="Screen quadrants">
+      <section></section>
+      <section></section>
+      <section></section>
+      <section></section>
+    </main>
+    <nav>
+      <p>Main-display capture check</p>
+      <button id="swap">Swap colors</button
+      ><button id="animate">Animate colors</button
+      ><button id="fullscreen">Full screen</button>
+    </nav>
+    <script>
+      const palettes = [
+        [
+          ['#ff0000', 'RED', '#000'],
+          ['#00ff00', 'GREEN', '#000'],
+          ['#0000ff', 'BLUE', '#fff'],
+          ['#ffffff', 'WHITE', '#000'],
+        ],
+        [
+          ['#00ffff', 'CYAN', '#000'],
+          ['#ff00ff', 'MAGENTA', '#000'],
+          ['#ffff00', 'YELLOW', '#000'],
+          ['#000000', 'BLACK', '#fff'],
+        ],
+      ];
+      let palette = 0;
+      let timer;
+      function paint() {
+        document.querySelectorAll('section').forEach((s, i) => {
+          const [bg, label, color] = palettes[palette][i];
+          s.style.background = bg;
+          s.style.color = color;
+          s.textContent = label;
+        });
+      }
+      function swap() {
+        palette = 1 - palette;
+        paint();
+      }
+      document.querySelector('#swap').onclick = swap;
+      document.querySelector('#animate').onclick = function () {
+        if (timer) {
+          clearInterval(timer);
+          timer = undefined;
+          this.textContent = 'Animate colors';
+        } else {
+          timer = setInterval(swap, 2500);
+          this.textContent = 'Pause colors';
+        }
+      };
+      document.querySelector('#fullscreen').onclick = () =>
+        document.documentElement.requestFullscreen();
+      paint();
+    </script>
+  </body>
+</html>

@@ -1,11 +1,18 @@
-export const SCHEMA_VERSION = 1 as const;
+export const SCHEMA_VERSION = 2 as const;
 export const ICON_KINDS = ['bulb', 'bar', 'strip', 'lamp'] as const;
 export type IconKind = (typeof ICON_KINDS)[number];
 export const INTENSITIES = ['subtle', 'balanced', 'vivid', 'punch'] as const;
 export type Intensity = (typeof INTENSITIES)[number];
 export type EditMode = 'location' | 'height';
 export type Position = { x: number; y: number; z: number };
+export type LightOutput =
+  { kind: 'virtual' } | { kind: 'esp32'; deviceId: string };
+export const validDeviceId = (id: unknown): id is string =>
+  typeof id === 'string' && /^esp32-[0-9a-f]{12}$/.test(id);
+export const shortDeviceId = (id: string): string =>
+  `IOT-${id.slice(-6).toUpperCase()}`;
 export type VirtualLight = {
+  output: LightOutput;
   id: string;
   name: string;
   position: Position;
@@ -66,6 +73,7 @@ export function createLight(
     id: makeId(),
     name: `Light ${number}`,
     iconKind: 'bulb',
+    output: { kind: 'virtual' },
     position: {
       x: Math.round((-1.7 + (index % 5) * 0.85) * 100) / 100,
       y: 1.2,
@@ -86,6 +94,10 @@ export function roomIsDirty(draft: Room, saved: Room): boolean {
         light.id !== other.id ||
         light.name !== other.name ||
         light.iconKind !== other.iconKind ||
+        light.output.kind !== other.output.kind ||
+        (light.output.kind === 'esp32' &&
+          (other.output.kind !== 'esp32' ||
+            light.output.deviceId !== other.output.deviceId)) ||
         light.position.x !== other.position.x ||
         light.position.y !== other.position.y ||
         light.position.z !== other.position.z
@@ -139,6 +151,7 @@ export function validateConfiguration(
     fail('Expected 1–16 rooms.');
   const roomIds = new Set<string>();
   const lightIds = new Set<string>();
+  const deviceIds = new Set<string>();
   for (const rawRoom of config.rooms as unknown[]) {
     const room = object(rawRoom, ['id', 'name', 'lights'], 'room');
     if (!id(room.id) || roomIds.has(room.id as string))
@@ -146,11 +159,11 @@ export function validateConfiguration(
     roomIds.add(room.id as string);
     if (!name(room.name)) fail('Room names must contain 1–64 bytes of text.');
     if (!Array.isArray(room.lights) || room.lights.length > MAX_LIGHTS)
-      fail('A room supports at most 64 virtual lights.');
+      fail('A room supports at most 64 lights.');
     for (const rawLight of room.lights as unknown[]) {
       const light = object(
         rawLight,
-        ['id', 'name', 'position', 'iconKind'],
+        ['id', 'name', 'position', 'iconKind', 'output'],
         'light',
       );
       if (!id(light.id) || lightIds.has(light.id as string))
@@ -160,6 +173,23 @@ export function validateConfiguration(
         fail('Light names must contain 1–64 bytes of text.');
       if (!ICON_KINDS.includes(light.iconKind as IconKind))
         fail('Unknown light appearance.');
+      const kind = (light.output as Record<string, unknown> | null)?.kind;
+      const output = object(
+        light.output,
+        kind === 'esp32' ? ['kind', 'deviceId'] : ['kind'],
+        'output',
+      );
+      if (kind !== 'virtual' && kind !== 'esp32') fail('Unknown light output.');
+      if (kind === 'esp32') {
+        if (
+          !validDeviceId(output.deviceId) ||
+          deviceIds.has(output.deviceId as string)
+        )
+          fail('Invalid or already bound hardware ID.');
+        deviceIds.add(output.deviceId as string);
+        if (deviceIds.size > 64)
+          fail('A configuration supports at most 64 physical outputs.');
+      }
       const position = object(light.position, ['x', 'y', 'z'], 'position');
       for (const axis of ['x', 'y', 'z'] as const) {
         const n = position[axis];
@@ -186,4 +216,35 @@ export function validateConfiguration(
     fail('Brightness must be a whole number from 0 to 100.');
   if (!INTENSITIES.includes(prefs.intensity as Intensity))
     fail('Unknown intensity.');
+}
+
+// Migration is in memory. Only an acknowledged save replaces a legacy file.
+export function migrateConfiguration(value: unknown): Configuration {
+  const migrated = clone(value);
+  if (
+    migrated &&
+    typeof migrated === 'object' &&
+    'schemaVersion' in migrated &&
+    migrated.schemaVersion === 1
+  ) {
+    const legacy = migrated as Record<string, unknown>;
+    if (!Array.isArray(legacy.rooms)) throw new Error('Invalid legacy rooms.');
+    for (const room of legacy.rooms) {
+      if (!room || !Array.isArray(room.lights))
+        throw new Error('Invalid legacy room.');
+      for (const light of room.lights) {
+        if (
+          !light ||
+          typeof light !== 'object' ||
+          Array.isArray(light) ||
+          'output' in light
+        )
+          throw new Error('Invalid legacy light.');
+        light.output = { kind: 'virtual' };
+      }
+    }
+    legacy.schemaVersion = SCHEMA_VERSION;
+  }
+  validateConfiguration(migrated);
+  return migrated;
 }

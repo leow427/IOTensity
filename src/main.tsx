@@ -1,24 +1,35 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { App } from './App';
+import { MiniRoom } from './ui/MiniRoom';
+import { NativeSyncOutput } from './sync/output';
 import { createPersistence } from './persistence/client';
 import { StoreProvider } from './state/context';
 import { AppStore } from './state/store';
 import './styles.css';
 
-const store = new AppStore(createPersistence());
-void store.load();
+const overlay =
+  new URLSearchParams(window.location.search).get('overlay') === '1';
+const output = new NativeSyncOutput();
+const store = overlay ? null : new AppStore(createPersistence(), output);
+if (store) void store.load();
+if (overlay) document.body.classList.add('overlay-body');
 const root = ReactDOM.createRoot(document.getElementById('root')!);
 root.render(
   <React.StrictMode>
-    <StoreProvider store={store}>
-      <App />
-    </StoreProvider>
+    {store ? (
+      <StoreProvider store={store}>
+        <App />
+      </StoreProvider>
+    ) : (
+      <MiniRoom output={output} />
+    )}
   </React.StrictMode>,
 );
-if (import.meta.hot)
-  import.meta.hot.dispose(() => {
-    root.unmount();
-    store.dispose();
-  });
-window.addEventListener('unload', () => store.dispose(), { once: true });
+const dispose = () => {
+  root.unmount();
+  if (store) store.dispose();
+  else output.dispose();
+};
+if (import.meta.hot) import.meta.hot.dispose(dispose);
+window.addEventListener('unload', dispose, { once: true });

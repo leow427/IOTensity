@@ -37,11 +37,8 @@ export const colorCss = (color: RGB): string =>
 export function resolveColor(
   light: VirtualLight,
   output: RGB | undefined,
-  brightness: number,
   mode?: EditMode,
 ): RGB {
   // Calibration is editing feedback and stays readable even at zero output brightness.
-  return mode
-    ? calibrationColor(light, mode)
-    : scaleColor(output ?? IDLE, brightness);
+  return mode ? calibrationColor(light, mode) : (output ?? IDLE);
 }

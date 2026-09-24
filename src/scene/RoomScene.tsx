@@ -217,11 +217,9 @@ function Orb({
   const p = light.position;
 
   useFrame(() => {
-    const state = store.getSnapshot();
     const rgb = resolveColor(
       light,
-      store.simulation.getColor(light.id),
-      state.preferences.brightness,
+      store.output.getColor(light.id),
       selected && editable ? mode : undefined,
     );
     color.setRGB(...rgb, 'srgb');
@@ -309,6 +307,7 @@ function Orb({
         <circleGeometry args={[0.27, 32]} />
         <meshBasicMaterial
           ref={haloMaterial}
+          toneMapped={false}
           transparent
           opacity={0.09}
           depthWrite={false}
@@ -333,7 +332,7 @@ function Orb({
         }}
       >
         <sphereGeometry args={[0.12, 24, 20]} />
-        <meshBasicMaterial ref={material} />
+        <meshBasicMaterial ref={material} toneMapped={false} />
       </mesh>
       {selected && editable && (
         <mesh

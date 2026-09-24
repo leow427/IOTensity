@@ -2,11 +2,13 @@
 
 ## Scope and architecture
 
-This milestone is software-only. Do not add hardware integration, discovery, pairing, transport adapters, accounts, cloud services, screen capture or a real sync engine. Keep future native processing separate from frontend state; no captured pixel buffers belong in React.
+This milestone supports local ESP32 RGB outputs and native screen sync. Do not add accounts, cloud services, DDP or a separate physical hub. Keep discovery, HTTP control, UDP transmission, session state, capture and color processing in Rust; no captured pixel buffers belong in React.
 
 - `src/domain`: portable configuration types, bounds, validation and color math.
 - `src/state/store.ts`: one external store consumed with React `useSyncExternalStore`. Owns saved configuration, room draft, selection, navigation guards and the serialized save queue.
-- `src/simulation`: one application-owned deterministic animation service with an injectable clock. Navigation must not own its lifetime.
+- `src-tauri/src/sync`: application-owned native screen/test/synthetic color sources with injected elapsed time for deterministic tests. Navigation must not own their lifetime.
+- `src-tauri/src/hardware`: mDNS discovery, identity-verified control, sessions and bounded UDP output. Consume final RGB8 from sync without additional brightness or smoothing.
+- `firmware/esp32`: identical firmware per board, eFuse identity, serial development provisioning and a separately scheduled UDP/PWM receiver.
 - `src/scene`: React Three Fiber rendering and pointer interactions. Camera transforms are not room coordinates.
 - `src/ui`: controls and bundled vector silhouettes. Generate cards directly from draft lights, keyed by stable IDs.
 - `src/persistence`: typed Tauri command client. Browser preview is volatile and must never claim disk persistence.
@@ -38,6 +40,8 @@ npm run test:e2e
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml --locked
+npm run test:firmware
+pio run --project-dir firmware/esp32
 npm run tauri -- build
 ```
 
@@ -49,6 +53,6 @@ Run meaningful domain, store, component, mocked IPC, Rust and browser tests. Use
 
 Keep the desktop instrument aesthetic: quiet warm surfaces, charcoal displays, legible labels, restrained orange accents and tactile controls. Icons are local SVGs, never emoji or branded assets. Preserve keyboard access, focus visibility, reduced-motion behavior and a horizontally scrolling light row without page overflow.
 
-Native capabilities are deliberately narrow: event listening, titlebar dragging and confirmed window destruction. Do not add shell, broad filesystem, network or screen permissions. macOS is the first verification target; keep file transactions and domain logic portable for Windows. Guard ordinary window closing; do not claim protection against forced termination.
+Native capabilities are deliberately narrow: event listening, titlebar dragging and confirmed window destruction. Do not add shell or broad filesystem permissions or frontend network access. Native screen capture and local ESP32 discovery/control are the only network/capture scope; keep their macOS purpose strings explicit. macOS is the first verification target; keep file transactions and domain logic portable for Windows. Guard ordinary window closing; do not claim protection against forced termination.
 
 Preserve unrelated changes. Run checks before committing and pushing to `main`; never force push or bypass safeguards. Keep development history in Git, not this file.

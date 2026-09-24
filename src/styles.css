@@ -1531,3 +1531,200 @@ input.range-z {
 .edit-tabs button {
   color: #4b563e;
 }
+
+.sync-status,
+.sync-note {
+  font-size: 11px;
+  line-height: 1.5;
+  color: #4b563e;
+  margin-top: 12px;
+}
+.transport-display .timecode {
+  font-size: 23px;
+  letter-spacing: -0.8px;
+}
+
+.source-select {
+  width: 100%;
+  margin: 0 0 14px;
+  padding: 8px;
+  border: 1px solid #a3af93;
+  border-radius: 5px;
+  background: #edf0e3;
+  color: #354426;
+  font: inherit;
+  font-size: 11px;
+}
+
+.overlay-control {
+  margin-top: 18px;
+}
+.overlay-control .button {
+  width: 100%;
+}
+.overlay-control p {
+  color: #4b563e;
+  font-size: 10px;
+  line-height: 1.5;
+  margin-top: 8px;
+}
+body.overlay-body {
+  min-width: 0;
+  background: #242b24;
+  color: #e3e8dc;
+  overflow: hidden;
+}
+.mini-room {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: #242b24;
+  border: 1px solid #78816d;
+  border-radius: 10px;
+  overflow: hidden;
+}
+.mini-room header {
+  height: 39px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  background: #e9eae1;
+  color: #30382d;
+  font-size: 12px;
+  flex-shrink: 0;
+  cursor: grab;
+}
+.mini-room small {
+  color: #55604b;
+  margin-left: 10px;
+}
+.mini-room button {
+  border: 0;
+  border-radius: 4px;
+  padding: 4px;
+  background: transparent;
+  color: #30382d;
+  display: flex;
+}
+.mini-room svg {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+.mini-room button svg {
+  width: 14px;
+  height: 14px;
+}
+.mini-room footer {
+  display: flex;
+  gap: 6px;
+  padding: 9px 12px;
+  font:
+    9px 'SFMono-Regular',
+    Consolas,
+    monospace;
+  color: #c6d2bc;
+  flex-shrink: 0;
+}
+.mini-room footer > span:last-child {
+  margin-left: auto;
+}
+.mini-room > p {
+  padding: 16px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Physical output remains a separate, explicit choice from virtual preview. */
+.add-physical-button {
+  background: #373a35;
+  color: #fff;
+}
+.output-group + .output-group {
+  margin-top: 18px;
+}
+.output-group h3 {
+  margin: 0 0 10px;
+  font-size: 10px;
+}
+.output-type {
+  font-size: 10px;
+  color: #41473d;
+  line-height: 1.5;
+}
+.output-type.online {
+  color: #296342;
+}
+.binding-control {
+  margin: 12px 0 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.binding-actions {
+  display: flex;
+  gap: 18px;
+}
+.physical-dialog {
+  width: min(680px, calc(100vw - 64px));
+  max-height: 85vh;
+  overflow: auto;
+  padding: 30px;
+  border: 1px solid #bbbcb1;
+  border-radius: 16px;
+  background: #edede5;
+  color: #2e322b;
+}
+.physical-dialog::backdrop {
+  background: rgb(28 31 26 / 50%);
+}
+.physical-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+.physical-heading h2 {
+  margin: 10px 0 16px;
+}
+.physical-dialog p {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.hardware-notice {
+  border: 1px solid #c9cbbf;
+  padding: 12px;
+  border-radius: 6px;
+}
+.device-list {
+  list-style: none;
+  padding: 0;
+}
+.device-list li {
+  padding: 18px 0;
+  border-bottom: 1px solid #c9cbbf;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.device-description {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.device-description span,
+.device-description code {
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.device-actions {
+  display: flex;
+  gap: 8px;
+}
+.device-actions .button {
+  padding: 10px 12px;
+}

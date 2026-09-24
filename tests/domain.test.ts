@@ -22,9 +22,10 @@ describe('shared configuration and coordinates', () => {
     const draft = defaultConfiguration().rooms[0];
     draft.lights.push(createLight(draft));
     const saved = {
-      lights: draft.lights.map(({ id, name, position, iconKind }) => ({
+      lights: draft.lights.map(({ id, name, position, iconKind, output }) => ({
         position: { z: position.z, y: position.y, x: position.x },
         iconKind,
+        output,
         name,
         id,
       })),
@@ -74,7 +75,7 @@ describe('shared configuration and coordinates', () => {
   );
   it('rejects unsupported versions, unknown runtime fields, fractional preferences and duplicate IDs', () => {
     expect(() =>
-      validateConfiguration({ ...fixture, schemaVersion: 2 }),
+      validateConfiguration({ ...fixture, schemaVersion: 99 }),
     ).toThrow('version');
     expect(() => validateConfiguration({ ...fixture, running: true })).toThrow(
       'fields',
@@ -110,9 +111,8 @@ describe('calibration', () => {
     expect(calibrationColor(light, 'height')).toEqual(HEIGHT_COLORS[0]);
     light.position.y = BOUNDS.y[1];
     expect(calibrationColor(light, 'height')).toEqual(HEIGHT_COLORS[1]);
-    expect(resolveColor(light, [1, 0, 0], 0)).toEqual([0, 0, 0]);
-    expect(resolveColor(light, [1, 0, 0], 0, 'height')).toEqual(
-      HEIGHT_COLORS[1],
-    );
+    expect(resolveColor(light, [0, 0, 0])).toEqual([0, 0, 0]);
+    expect(resolveColor(light, [188 / 255, 0, 0])).toEqual([188 / 255, 0, 0]);
+    expect(resolveColor(light, [1, 0, 0], 'height')).toEqual(HEIGHT_COLORS[1]);
   });
 });

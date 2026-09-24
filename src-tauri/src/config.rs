@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, fs, io::Write, path::PathBuf, sync::Mutex};
 
+pub const X_BOUNDS: (f64, f64) = (-3.0, 3.0);
+pub const Y_BOUNDS: (f64, f64) = (0.15, 3.0);
 const MAX_SAFE_REVISION: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -27,6 +29,7 @@ pub struct Light {
     pub name: String,
     pub position: Position,
     pub icon_kind: IconKind,
+    pub output: LightOutput,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -84,7 +87,7 @@ impl ConfigError {
 impl Default for Configuration {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             revision: 0,
             rooms: vec![Room {
                 id: "studio".into(),
@@ -114,7 +117,7 @@ fn valid_name(name: &str) -> bool {
 
 pub fn validate(config: &Configuration) -> Result<(), ConfigError> {
     let invalid = |message| Err(ConfigError::new("invalid", message));
-    if config.schema_version != 1 {
+    if config.schema_version != 2 {
         return Err(ConfigError::new("version", "Unsupported configuration version. The file has not been changed. Use a compatible version of IOTensity."));
     }
     if config.revision > MAX_SAFE_REVISION {
@@ -128,6 +131,7 @@ pub fn validate(config: &Configuration) -> Result<(), ConfigError> {
     }
     let mut rooms = HashSet::new();
     let mut lights = HashSet::new();
+    let mut devices = HashSet::new();
     for room in &config.rooms {
         if !valid_id(&room.id) || !rooms.insert(&room.id) {
             return invalid("Invalid or duplicate room ID.");
@@ -136,7 +140,7 @@ pub fn validate(config: &Configuration) -> Result<(), ConfigError> {
             return invalid("Room names must contain 1–64 bytes of text.");
         }
         if room.lights.len() > 64 {
-            return invalid("A room supports at most 64 virtual lights.");
+            return invalid("A room supports at most 64 lights.");
         }
         for light in &room.lights {
             if !valid_id(&light.id) || !lights.insert(&light.id) {
@@ -145,12 +149,17 @@ pub fn validate(config: &Configuration) -> Result<(), ConfigError> {
             if !valid_name(&light.name) {
                 return invalid("Light names must contain 1–64 bytes of text.");
             }
+            if let LightOutput::Esp32 { device_id } = &light.output {
+                if !valid_device_id(device_id) || !devices.insert(device_id) || devices.len() > 64 {
+                    return invalid("Invalid or already bound hardware ID.");
+                }
+            }
             let p = &light.position;
             if !p.x.is_finite()
                 || !p.y.is_finite()
                 || !p.z.is_finite()
-                || !(-3.0..=3.0).contains(&p.x)
-                || !(0.15..=3.0).contains(&p.y)
+                || !(X_BOUNDS.0..=X_BOUNDS.1).contains(&p.x)
+                || !(Y_BOUNDS.0..=Y_BOUNDS.1).contains(&p.y)
                 || !(-0.7..=4.0).contains(&p.z)
             {
                 return invalid("Light position is outside the room bounds.");
@@ -190,12 +199,7 @@ impl ConfigStore {
         }
         let bytes = fs::read(&self.path).map_err(ConfigError::io)?;
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| ConfigError::new("invalid", format!("Configuration is malformed ({error}). Restore a valid backup in the application data folder, then retry. The file has not been changed.")))?;
-        if value.get("schemaVersion").and_then(|v| v.as_u64()) != Some(1) {
-            return Err(ConfigError::new("version", "Unsupported configuration version. The file has not been changed. Use a compatible version of IOTensity."));
-        }
-        let config: Configuration = serde_json::from_value(value).map_err(|error| ConfigError::new("invalid", format!("Invalid configuration: {error}. Restore a valid backup, then retry. The file has not been changed.")))?;
-        validate(&config)?;
-        Ok(config)
+        decode_configuration(value)
     }
 
     pub fn load(&self) -> Result<Configuration, ConfigError> {
@@ -246,4 +250,68 @@ impl ConfigStore {
             .map_err(|error| ConfigError::io(error.error))?;
         Ok(config)
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum LightOutput {
+    Virtual,
+    Esp32 {
+        #[serde(rename = "deviceId")]
+        device_id: String,
+    },
+}
+
+pub fn valid_device_id(id: &str) -> bool {
+    id.len() == 18
+        && id.starts_with("esp32-")
+        && id[6..]
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+pub fn decode_configuration(mut value: serde_json::Value) -> Result<Configuration, ConfigError> {
+    let invalid = || {
+        ConfigError::new(
+            "invalid",
+            "Invalid legacy configuration. The file has not been changed.",
+        )
+    };
+    match value.get("schemaVersion").and_then(|v| v.as_u64()) {
+        Some(1) => {
+            let rooms = value
+                .get_mut("rooms")
+                .and_then(|v| v.as_array_mut())
+                .ok_or_else(invalid)?;
+            for room in rooms {
+                let lights = room
+                    .get_mut("lights")
+                    .and_then(|v| v.as_array_mut())
+                    .ok_or_else(invalid)?;
+                for light in lights {
+                    let light = light.as_object_mut().ok_or_else(invalid)?;
+                    if light.contains_key("output") {
+                        return Err(invalid());
+                    }
+                    light.insert("output".into(), serde_json::json!({"kind":"virtual"}));
+                }
+            }
+            value["schemaVersion"] = 2.into();
+        }
+        Some(2) => {}
+        _ => {
+            return Err(ConfigError::new(
+                "version",
+                "Unsupported configuration version. The file has not been changed.",
+            ))
+        }
+    }
+    let config: Configuration = serde_json::from_value(value).map_err(|error| {
+        ConfigError::new(
+            "invalid",
+            format!("Invalid configuration: {error}. The file has not been changed."),
+        )
+    })?;
+    validate(&config)?;
+    Ok(config)
 }

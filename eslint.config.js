@@ -10,6 +10,7 @@ export default tseslint.config(
       'dist',
       'node_modules',
       '.tooling',
+      'firmware/esp32/.pio',
       'src-tauri/target',
       'src-tauri/gen',
       'playwright-report',

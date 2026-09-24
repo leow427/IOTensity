@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>NSScreenCaptureUsageDescription</key>
+<string>IOTensity samples your main display locally to color your virtual room lights. No images are saved or transmitted.</string>
+<key>NSLocalNetworkUsageDescription</key><string>IOTensity discovers ESP32 lights and sends RGB colors over your local network.</string>
+<key>NSBonjourServices</key><array><string>_iotensity._tcp</string></array>
+</dict></plist>

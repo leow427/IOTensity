@@ -4,6 +4,7 @@ import { useAppState, useStore } from '../state/context';
 import { RoomScene } from '../scene/RoomScene';
 import { Icon, LightIcon } from './Icons';
 import { LightCards } from './LightCards';
+import { PhysicalLightsDialog, PhysicalStatus } from './PhysicalLights';
 
 const APPEARANCE = {
   bulb: 'Bulb',
@@ -77,6 +78,9 @@ function CoordinateControl({
 export function RoomEditor() {
   const store = useStore();
   const state = useAppState();
+  const [physicalPicker, setPhysicalPicker] = useState<
+    string | null | undefined
+  >(undefined);
   const [resetKey, setResetKey] = useState(0);
   const room = state.draft!;
   const light = room.lights.find((item) => item.id === state.selectedLightId);
@@ -151,7 +155,16 @@ export function RoomEditor() {
                   aria-label="Add virtual light"
                 >
                   <Icon name="plus" size={19} />
-                  <span>Add light</span>
+                  <span>Virtual light</span>
+                </button>
+                <button
+                  className="button add-light-button add-physical-button"
+                  disabled={saving || room.lights.length >= MAX_LIGHTS}
+                  onClick={() => setPhysicalPicker(null)}
+                  aria-label="Add physical light"
+                >
+                  <Icon name="plus" size={19} />
+                  <span>Physical light</span>
                 </button>
               </div>
             </div>
@@ -195,14 +208,25 @@ export function RoomEditor() {
               </span>
               <span className="tray-hint">Select a light to position it</span>
             </div>
-            {room.lights.length ? (
-              <LightCards
-                lights={room.lights}
-                selectedId={state.selectedLightId}
-                mode={state.editMode}
-                editable
-              />
-            ) : (
+            {(['virtual', 'esp32'] as const).map((kind) => {
+              const lights = room.lights.filter(
+                (light) => light.output.kind === kind,
+              );
+              return lights.length ? (
+                <div key={kind} className="output-group">
+                  <h3 className="eyebrow mono">
+                    {kind === 'virtual' ? 'VIRTUAL PREVIEW' : 'PHYSICAL LIGHTS'}
+                  </h3>
+                  <LightCards
+                    lights={lights}
+                    selectedId={state.selectedLightId}
+                    mode={state.editMode}
+                    editable
+                  />
+                </div>
+              ) : null;
+            })}
+            {!room.lights.length && (
               <button className="empty-card" onClick={() => store.addLight()}>
                 <Icon name="plus" size={24} />
                 <span>Add a virtual light</span>
@@ -227,7 +251,7 @@ export function RoomEditor() {
               <div className="inspector-light-icon">
                 <LightIcon kind={light.iconKind} size={43} />
                 <span className="mono">
-                  VIRTUAL /{' '}
+                  {light.output.kind === 'virtual' ? 'VIRTUAL' : 'PHYSICAL'} /{' '}
                   {String(
                     room.lights.findIndex((item) => item.id === light.id) + 1,
                   ).padStart(2, '0')}
@@ -246,6 +270,46 @@ export function RoomEditor() {
                   store.updateLight(light.id, { name: event.target.value })
                 }
               />
+              <div className="binding-control">
+                <PhysicalStatus light={light} />
+                {light.output.kind === 'esp32' ? (
+                  <div className="binding-actions">
+                    <button
+                      className="text-button"
+                      disabled={
+                        saving ||
+                        !!state.identifying ||
+                        !state.devices.find(
+                          (d) =>
+                            light.output.kind === 'esp32' &&
+                            d.deviceId === light.output.deviceId,
+                        )?.online
+                      }
+                      onClick={() => {
+                        if (light.output.kind === 'esp32')
+                          void store.identifyDevice(light.output.deviceId);
+                      }}
+                    >
+                      Identify
+                    </button>
+                    <button
+                      className="text-button"
+                      disabled={saving}
+                      onClick={() => store.bindLight(light.id, null)}
+                    >
+                      Use virtual output
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    className="text-button"
+                    disabled={saving}
+                    onClick={() => setPhysicalPicker(light.id)}
+                  >
+                    Bind physical light
+                  </button>
+                )}
+              </div>
               <fieldset className="appearance-picker" disabled={saving}>
                 <legend className="field-label">Appearance</legend>
                 <div>
@@ -388,6 +452,17 @@ export function RoomEditor() {
           )}
         </aside>
       </div>
+      {physicalPicker !== undefined && (
+        <PhysicalLightsDialog
+          lightId={physicalPicker}
+          onClose={() => setPhysicalPicker(undefined)}
+        />
+      )}
+      {state.hardwareError && physicalPicker === undefined && (
+        <p className="error-banner" role="alert">
+          {state.hardwareError}
+        </p>
+      )}
       <footer className="page-footer">
         <span>
           <Icon name="info" size={14} />

@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-test('browser preview: save, isolate draft, discard, and keep simulation alive across navigation', async ({
+test('browser preview: save, isolate draft, discard, and label native sync unavailable', async ({
   page,
 }) => {
   await page.goto('/');
@@ -30,15 +30,12 @@ test('browser preview: save, isolate draft, discard, and keep simulation alive a
   await expect(
     page.getByRole('group', { name: 'Saved virtual lights' }),
   ).toContainText('Desk left');
-  await page.getByRole('button', { name: 'Start Sync' }).click();
-  await expect(page.getByRole('button', { name: 'Stop Sync' })).toBeEnabled();
-  await page.getByRole('button', { name: 'Your Rooms 02' }).click();
-  await page.getByRole('button', { name: 'Sync 01' }).click();
-  await expect(page.getByRole('button', { name: 'Stop Sync' })).toBeVisible();
-  await page.getByRole('button', { name: 'Stop Sync' }).click();
-  const stopped = await page.locator('.light-card').getAttribute('style');
+  await expect(page.getByRole('button', { name: 'Start Sync' })).toBeDisabled();
+  await expect(page.getByText(/Desktop app required/)).toBeVisible();
   await page.getByRole('button', { name: 'Punch intensity' }).click();
-  await expect(page.locator('.light-card')).toHaveAttribute('style', stopped!);
+  await expect(
+    page.getByRole('button', { name: 'Punch intensity' }),
+  ).toHaveAttribute('aria-pressed', 'true');
 });
 
 test('browser preview: overflowing cards, keyboard selection and zero-brightness calibration', async ({
@@ -78,7 +75,10 @@ test('browser preview: overflowing cards, keyboard selection and zero-brightness
   await page.getByRole('button', { name: 'Your Rooms 02' }).click();
   await expect(first).toHaveAttribute('style', /--light-color: rgb\((?!0 0 0)/);
   await page.getByRole('button', { name: 'Clear light selection' }).click();
-  await expect(first).toHaveAttribute('style', /--light-color: rgb\(0 0 0\)/);
+  await expect(first).toHaveAttribute(
+    'style',
+    /--light-color: rgb\(179 186 179\)/,
+  );
   await expect(first).toBeVisible();
   await expect(page.getByRole('status')).not.toContainText('UNSAVED');
   await page.setViewportSize({ width: 1000, height: 720 });

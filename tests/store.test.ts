@@ -2,17 +2,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import fixture from './fixtures/configuration.json';
 import { AppStore } from '../src/state/store';
 import type { Configuration } from '../src/domain/model';
-import { Simulation } from '../src/simulation/engine';
-import { deferred, FakeClock, MemoryPersistence } from './helpers';
+import { deferred, FakeOutput, MemoryPersistence } from './helpers';
 
 const stores: AppStore[] = [];
 async function setup(saved?: Configuration) {
   const persistence = new MemoryPersistence(saved);
-  const clock = new FakeClock();
-  const store = new AppStore(persistence, new Simulation(clock));
+  const store = new AppStore(persistence, new FakeOutput());
   stores.push(store);
   await store.load();
-  return { store, persistence, clock };
+  return { store, persistence };
 }
 afterEach(() => stores.splice(0).forEach((store) => store.dispose()));
 
@@ -32,14 +30,13 @@ describe('draft / saved / runtime ownership', () => {
     expect(store.getSnapshot().selectedLightId).toBeNull();
     expect(store.dirty).toBe(false);
   });
-  it('selection, tabs and simulation never dirty the room; reverting edits clears dirty', async () => {
-    const { store, clock } = await setup(fixture as Configuration);
+  it('selection, tabs and native output never dirty the room; reverting edits clears dirty', async () => {
+    const { store } = await setup(fixture as Configuration);
     const id = 'light-bulb';
     store.selectLight(id);
     store.setEditMode('height');
-    store.start();
-    clock.advance(100);
-    store.stop();
+    await store.start();
+    await store.stop();
     expect(store.dirty).toBe(false);
     store.updateLight(id, { iconKind: 'strip' });
     expect(store.dirty).toBe(true);
@@ -115,7 +112,7 @@ describe('draft / saved / runtime ownership', () => {
     expect(persistence.config.revision).toBe(3);
     expect(store.getSnapshot().preferences.brightness).toBe(80);
   });
-  it('restores names, appearances and positions on discard and reload, with simulation stopped', async () => {
+  it('restores names, appearances and positions on discard and reload, with native output stopped', async () => {
     const { store, persistence } = await setup(fixture as Configuration);
     store.updateLight('light-bar', { name: 'Saved name', iconKind: 'lamp' });
     await store.saveRoom();
@@ -124,7 +121,7 @@ describe('draft / saved / runtime ownership', () => {
     expect(store.getSnapshot().pending).toBe('discard');
     await store.resolveTransition('discard');
     expect(store.getSnapshot().draft!.lights[1].iconKind).toBe('lamp');
-    const reload = new AppStore(persistence, new Simulation(new FakeClock()));
+    const reload = new AppStore(persistence, new FakeOutput());
     stores.push(reload);
     await reload.load();
     expect(reload.getSnapshot().draft!.lights[1].name).toBe('Saved name');
@@ -150,11 +147,11 @@ describe('draft / saved / runtime ownership', () => {
     expect(store.getSnapshot().page).toBe('sync');
     expect(store.getSnapshot().saved!.rooms[0].lights).toHaveLength(1);
   });
-  it('guards normal close, flushes preferences and leaves an unchanged simulation running across navigation', async () => {
-    const { store, clock } = await setup(fixture as Configuration);
-    store.start();
+  it('guards normal close, flushes preferences and leaves an unchanged native output running across navigation', async () => {
+    const { store } = await setup(fixture as Configuration);
+    await store.start();
     await store.requestTransition('rooms');
-    expect(clock.callbacks.size).toBe(1);
+    expect(store.getSnapshot().running).toBe(true);
     store.addLight();
     await store.requestTransition('close');
     expect(store.getSnapshot().readyToClose).toBe(false);
