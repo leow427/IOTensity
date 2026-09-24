@@ -1,6 +1,6 @@
 # ESP32 RGB prototype
 
-The initial target is an ESP32 DevKit / ESP32-WROOM board, one ordinary three-channel RGB LED, and the same **2.4 GHz Wi-Fi LAN** as the computer. The pinned PlatformIO environment uses Arduino-ESP32 2.0.17. One firmware image works on every board: identity comes from the factory eFuse MAC, never a build-time serial number.
+The initial target is an ESP32 DevKit / ESP32-WROOM board and one ordinary three-channel RGB LED. The ESP32 needs **2.4 GHz Wi-Fi**; the computer must be on the same local network and can use another Wi-Fi band or Ethernet. The pinned PlatformIO environment uses Arduino-ESP32 2.0.17. One firmware image works on every board: identity comes from the factory eFuse MAC, never a build-time serial number.
 
 ## Wiring
 
@@ -68,4 +68,4 @@ cargo run --manifest-path src-tauri/Cargo.toml --locked --example esp32_probe --
 
 The probe uses a temporary configuration file and production native discovery, control, and UDP code. It checks Identify, exact RGB, the packet rate, static keepalives, receiver reboot, offline retention/recovery, service restart with persisted binding, explicit stop, and source timeout. Run it while the native app is **not streaming** to the emulator. To test changed endpoints manually, stop the emulator and restart it with the same ID and another `--port`; DHCP/address changes are also covered by injected controller tests.
 
-See [the architecture and wire contract](esp32-architecture.md) and [observed verification](esp32-verification.md). API references: [Espressif Arduino LEDC](https://docs.espressif.com/projects/arduino-esp32/en/latest/api/ledc.html), [Espressif mDNS example](https://github.com/espressif/arduino-esp32/blob/master/libraries/ESPmDNS/examples/mDNS_Web_Server/mDNS_Web_Server.ino), and [PlatformIO Espressif32](https://docs.platformio.org/en/latest/platforms/espressif32.html). Current Arduino 3.x LEDC APIs differ; this repository intentionally compiles against the pinned 2.0.17 environment.
+Desktop setup, architecture and the wire contract are in [AGENTS.md](../AGENTS.md). Arduino 3.x LEDC APIs differ; build against the pinned 2.0.17 environment. Emulator results do not replace physical flashing, wiring/polarity, PWM, power-cycle, DHCP and latency checks on a board.
