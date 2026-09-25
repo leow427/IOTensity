@@ -228,6 +228,14 @@ export class AppStore {
     this.set({ hardwareError: null });
     return true;
   }
+  async retryDiscovery() {
+    this.set({ hardwareError: null });
+    try {
+      await this.hardware.retryDiscovery();
+    } catch (error) {
+      this.set({ hardwareError: errorMessage(error) });
+    }
+  }
   async identifyDevice(deviceId: string) {
     if (this.state.identifying) return;
     this.set({ identifying: deviceId, hardwareError: null });

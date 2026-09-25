@@ -1,4 +1,5 @@
 pub mod control;
+mod discovery;
 pub mod engine;
 pub mod protocol;
 
@@ -57,6 +58,14 @@ struct State {
     last_frame: Option<Instant>,
 }
 impl State {
+    fn reset_discovery(&mut self, network_changed: bool) {
+        for device in self.devices.values_mut() {
+            if network_changed || !device.connection.online {
+                device.advertisements.clear();
+                device.connection = ConnectionState::default();
+            }
+        }
+    }
     fn binding(&self, id: &str) -> Option<String> {
         self.config
             .rooms
@@ -107,6 +116,7 @@ impl State {
 struct Inner {
     state: Mutex<State>,
     shutdown: AtomicBool,
+    retry_discovery: AtomicBool,
     client_id: String,
 }
 #[derive(Clone)]
@@ -116,6 +126,7 @@ impl HardwareService {
         let service = Self(Arc::new(Inner {
             state: Mutex::new(State::default()),
             shutdown: AtomicBool::new(false),
+            retry_discovery: AtomicBool::new(false),
             client_id: protocol::hex(&protocol::token()?),
         }));
         let sender = service.clone();
@@ -186,6 +197,9 @@ impl HardwareService {
     }
     pub fn devices(&self) -> DevicesSnapshot {
         self.0.state.lock().unwrap().snapshot()
+    }
+    pub fn retry_discovery(&self) {
+        self.0.retry_discovery.store(true, Ordering::Release);
     }
     pub fn set_reduced_motion(&self, reduced_motion: bool) {
         self.0.state.lock().unwrap().reduced_motion = reduced_motion;
@@ -314,6 +328,8 @@ impl HardwareService {
     }
     fn discovery_loop(&self, publish: impl Fn(DevicesSnapshot)) {
         let mut previous = None;
+        let clock = Instant::now();
+        let mut recovery = discovery::Recovery::default();
         while !self.is_shutdown() {
             let daemon = match ServiceDaemon::new() {
                 Ok(daemon) => daemon,
@@ -385,9 +401,31 @@ impl HardwareService {
                         }
                     }
                 }
-                // mDNS's normal browse backoff reaches an hour. Bound recovery time
-                // after a lost announcement, network switch, or sleep/wake instead.
-                if network_changed || searched.elapsed() >= Duration::from_secs(10) {
+                let requested = self.0.retry_discovery.swap(false, Ordering::AcqRel);
+                let online = self
+                    .0
+                    .state
+                    .lock()
+                    .unwrap()
+                    .devices
+                    .values()
+                    .any(|d| d.connection.online);
+                if recovery.restart(
+                    clock.elapsed().as_millis() as u64,
+                    network_changed || requested,
+                    online,
+                ) {
+                    self.0
+                        .state
+                        .lock()
+                        .unwrap()
+                        .reset_discovery(network_changed);
+                    // Keep identities and room bindings, but recreate the socket
+                    // and multicast membership instead of only issuing another query.
+                    break;
+                }
+                // Keep looking for additional lights while existing ones are healthy.
+                if searched.elapsed() >= Duration::from_secs(10) {
                     let refreshed = daemon
                         .stop_browse(SERVICE)
                         .and_then(|_| daemon.browse(SERVICE));
@@ -430,7 +468,9 @@ impl HardwareService {
                     previous = Some(snapshot);
                 }
             }
-            let _ = daemon.shutdown();
+            if let Ok(stopped) = daemon.shutdown() {
+                let _ = stopped.recv_timeout(Duration::from_secs(1));
+            }
         }
     }
     fn device_loop(&self, id: String) {
@@ -482,6 +522,38 @@ pub fn lan_address(ip: Ipv4Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn socket_recovery_retains_bindings_and_does_not_interrupt_healthy_outputs() {
+        let config: Configuration =
+            serde_json::from_str(include_str!("../../../tests/fixtures/configuration.json"))
+                .unwrap();
+        let light = config.rooms[0].lights.last().unwrap();
+        let LightOutput::Esp32 { device_id } = &light.output else {
+            panic!("physical fixture")
+        };
+        let id = device_id.clone();
+        let logical_id = light.id.clone();
+        let mut state = State {
+            config,
+            ..State::default()
+        };
+        let mut device = Device::default();
+        device.connection.online = true;
+        device.advertisements.insert(
+            "light._iotensity._tcp.local.".into(),
+            vec!["192.168.1.39:80".parse().unwrap()],
+        );
+        state.devices.insert(id.clone(), device);
+        state.reset_discovery(false);
+        assert!(state.devices[&id].connection.online);
+        assert!(!state.wish(&id).unwrap().endpoints.is_empty());
+        state.reset_discovery(true);
+        assert!(!state.devices[&id].connection.online);
+        assert!(state.wish(&id).unwrap().endpoints.is_empty());
+        assert_eq!(state.binding(&id), Some(logical_id));
+        assert_eq!(state.devices.len(), 1);
+    }
 
     #[test]
     fn offline_binding_is_visible_even_without_output_frames() {

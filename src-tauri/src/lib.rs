@@ -96,6 +96,11 @@ fn hardware_snapshot(
 ) -> hardware::DevicesSnapshot {
     hardware.devices()
 }
+
+#[tauri::command]
+fn retry_hardware_discovery(hardware: tauri::State<'_, hardware::HardwareService>) {
+    hardware.retry_discovery();
+}
 #[tauri::command]
 async fn identify_device(
     hardware: tauri::State<'_, hardware::HardwareService>,
@@ -146,6 +151,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             hardware_snapshot,
+            retry_hardware_discovery,
             identify_device,
             load_config,
             save_config,

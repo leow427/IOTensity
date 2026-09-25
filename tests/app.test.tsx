@@ -149,9 +149,11 @@ describe('physical light UI', () => {
       boundLightId: null,
     };
     const identify = vi.fn(async () => {});
+    const retryDiscovery = vi.fn(async () => {});
     const { user, store } = await setup({
       available: true,
       identify,
+      retryDiscovery,
       dispose() {},
       async connect(listener) {
         receive = listener;
@@ -164,6 +166,12 @@ describe('physical light UI', () => {
       screen.getByRole('button', { name: 'Add physical light' }),
     );
     const dialog = screen.getByRole('dialog');
+    const draftBeforeRetry = structuredClone(store.getSnapshot().draft);
+    await user.click(
+      within(dialog).getByRole('button', { name: 'Retry discovery' }),
+    );
+    expect(retryDiscovery).toHaveBeenCalledOnce();
+    expect(store.getSnapshot().draft).toEqual(draftBeforeRetry);
     await user.click(
       within(dialog).getByRole('button', { name: 'Identify IOT-A1B2C3' }),
     );
@@ -208,6 +216,7 @@ describe('physical light UI', () => {
     const { user, store } = await setup({
       available: true,
       async identify() {},
+      async retryDiscovery() {},
       dispose() {},
       async connect(receive) {
         receive({ devices: [device], discoveryError: null });

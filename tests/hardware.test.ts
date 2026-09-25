@@ -21,6 +21,7 @@ export class FakeHardware implements HardwareClient {
   available = true;
   received?: (snapshot: DevicesSnapshot) => void;
   identified: string[] = [];
+  retries = 0;
   async connect(receive: (snapshot: DevicesSnapshot) => void) {
     this.received = receive;
     this.update(true);
@@ -43,6 +44,9 @@ export class FakeHardware implements HardwareClient {
   }
   async identify(deviceId: string) {
     this.identified.push(deviceId);
+  }
+  async retryDiscovery() {
+    this.retries++;
   }
   dispose() {}
 }
@@ -176,7 +180,9 @@ describe('native hardware boundary', () => {
     await connecting;
     expect(events).toEqual([{ devices: [], discoveryError: 'New event' }]);
     await client.identify(id);
+    await client.retryDiscovery();
     expect(calls).toContainEqual(['identify_device', { deviceId: id }]);
+    expect(calls).toContainEqual(['retry_hardware_discovery', undefined]);
     client.dispose();
   });
 });

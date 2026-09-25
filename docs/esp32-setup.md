@@ -37,7 +37,7 @@ The boot log prints `esp32-<12 lowercase hex digits>` and a services-ready messa
 
 ## Desktop workflow
 
-1. Run the native IOTensity app. Allow local network access if macOS requests it. The browser editor does not access physical devices.
+1. Run the native IOTensity app from `~/Applications/IOTensity.app`; ordinary local release builds update that copy automatically. Allow local network access if macOS requests it. The browser editor does not access physical devices.
 2. Open **Your Rooms → + Physical light**. An online device should appear automatically. Both machines must be on the same multicast-capable LAN; guest-network/AP client isolation and some VPNs block discovery.
 3. Choose **Identify**. The LED blinks white/off three times over about 900 ms, then resumes the current stream or off state.
 4. Choose **Add light** to create a new logical room light. Alternatively, select an existing virtual room light, choose **Bind physical light**, and select the ESP32. Its logical light ID and room position are retained.
@@ -46,6 +46,8 @@ The boot log prints `esp32-<12 lowercase hex digits>` and a services-ready messa
 7. Stop returns the LED to off. After app restart the binding is restored but Sync is intentionally stopped. Start again to stream. An ESP32 restart, brief outage, or DHCP change while Sync remains requested reconnects automatically.
 
 An offline light is never deleted from the room. The app resolves its current address by full ID and retries control with bounded backoff. It never persists a remembered IP. Allow a few seconds for network/discovery recovery. Only one computer may stream to a device at once; a second is reported busy until the first stops or its one-second stream lease expires.
+
+If the list remains empty, confirm both devices are on the same LAN and that IOTensity is allowed under macOS Privacy & Security → Local Network, then choose **Retry discovery**. The app also recreates stalled discovery sockets automatically. Avoid launching older build/worktree copies with the same application identity.
 
 ## Emulator and repeatable verification
 

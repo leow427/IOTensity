@@ -91,6 +91,12 @@ export function PhysicalLightsDialog({
             {state.discoveryError ??
               'Discovering automatically on your local network…'}
           </p>
+          <button
+            className="button button-outline"
+            onClick={() => void store.retryDiscovery()}
+          >
+            Retry discovery
+          </button>
           {!state.devices.length && (
             <p>
               No ESP32 lights found yet. Connect the light to the same Wi-Fi

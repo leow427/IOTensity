@@ -27,6 +27,7 @@ export interface HardwareClient {
   readonly available: boolean;
   connect(onChange: (snapshot: DevicesSnapshot) => void): Promise<void>;
   identify(deviceId: string): Promise<void>;
+  retryDiscovery(): Promise<void>;
   dispose(): void;
 }
 export class NativeHardwareClient implements HardwareClient {
@@ -63,6 +64,10 @@ export class NativeHardwareClient implements HardwareClient {
         new Error('Physical lights require the desktop application.'),
       );
     return this.transport.invoke<void>('identify_device', { deviceId });
+  }
+  retryDiscovery() {
+    if (!this.available) return Promise.resolve();
+    return this.transport.invoke<void>('retry_hardware_discovery');
   }
   dispose() {
     this.disposed = true;

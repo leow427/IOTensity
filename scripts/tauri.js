@@ -4,6 +4,12 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chooseIdentity, isMacBundle, parseIdentities } from './signing.js';
+import {
+  appInstallation,
+  assertNotRunning,
+  installBundle,
+  shouldInstallApp,
+} from './install-app.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const args = process.argv.slice(2);
@@ -45,7 +51,10 @@ try {
       'Using the pinned macOS signing identity; unsigned fallback is disabled.',
     );
   }
-  if (process.platform === 'darwin' && args[0] === 'dev') {
+  if (
+    process.platform === 'darwin' &&
+    (args[0] === 'dev' || args.includes('--debug'))
+  ) {
     // Tauri dev runs an unbundled executable. Its permissions and configuration
     // must never replace those belonging to the signed release app.
     args.push(
@@ -55,6 +64,13 @@ try {
         productName: 'IOTensity Dev',
       }),
     );
+  }
+  const installation = shouldInstallApp(process.platform, args, env)
+    ? appInstallation(root, env)
+    : null;
+  if (installation) {
+    assertNotRunning(installation.source);
+    assertNotRunning(installation.destination);
   }
   const require = createRequire(import.meta.url);
   const cli = join(
@@ -74,6 +90,16 @@ try {
   });
   child.on('exit', (code) => {
     process.exitCode = code ?? 1;
+    if (code === 0 && installation) {
+      try {
+        console.log(`Installed current build: ${installBundle(installation)}`);
+      } catch (error) {
+        console.error(
+          `Build completed, but installation failed: ${error.message}`,
+        );
+        process.exitCode = 1;
+      }
+    }
   });
 } catch (error) {
   console.error(error.message);
