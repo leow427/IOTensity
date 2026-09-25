@@ -59,7 +59,7 @@ export function OverlayControl() {
       >
         {open ? 'Close mini room' : 'Open mini room'}
       </button>
-      <p>Keep your virtual lights above other windows.</p>
+      <p>Show lights above other windows.</p>
       {error && <p role="alert">{error}</p>}
     </div>
   );

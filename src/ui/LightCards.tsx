@@ -78,15 +78,8 @@ export function LightCards({
             </span>
             <LightIcon kind={light.iconKind} />
             <span className="card-name">{light.name}</span>
-            <PhysicalStatus light={light} />
-            {editable && (
-              <span className="card-detail mono">
-                {selectedId === light.id
-                  ? 'SELECTED'
-                  : light.output.kind === 'virtual'
-                    ? 'VIRTUAL LIGHT'
-                    : 'PHYSICAL LIGHT'}
-              </span>
+            {light.output.kind === 'esp32' && (
+              <PhysicalStatus light={light} compact />
             )}
           </>
         );

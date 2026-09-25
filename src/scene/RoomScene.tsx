@@ -360,9 +360,7 @@ class SceneBoundary extends Component<
     return this.state.failed ? (
       <div className="scene-fallback">
         <p>3D view unavailable</p>
-        <span>
-          You can still select lights and adjust their coordinates below.
-        </span>
+        <span>Use the light cards and position controls.</span>
       </div>
     ) : (
       this.props.children

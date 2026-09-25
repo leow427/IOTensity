@@ -183,7 +183,6 @@ export function MiniRoom({ output }: { output: SyncOutput }) {
               ? 'LIVE · SIMULATION'
               : 'LIVE · TEST IMAGE'
           : status.status.toUpperCase()}
-        <span>SAVED POSITIONS</span>
       </footer>
     </main>
   );

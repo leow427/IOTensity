@@ -3,7 +3,13 @@ import { shortDeviceId, type VirtualLight } from '../domain/model';
 import { useAppState, useStore } from '../state/context';
 import { Icon } from './Icons';
 
-export function PhysicalStatus({ light }: { light: VirtualLight }) {
+export function PhysicalStatus({
+  light,
+  compact = false,
+}: {
+  light: VirtualLight;
+  compact?: boolean;
+}) {
   const state = useAppState();
   if (light.output.kind === 'virtual')
     return <span className="output-type">Virtual preview</span>;
@@ -14,8 +20,12 @@ export function PhysicalStatus({ light }: { light: VirtualLight }) {
       className={`output-type ${device?.online ? 'online' : ''}`}
       title={id}
     >
-      {shortDeviceId(id)} ·{' '}
-      {device?.online ? (device.streaming ? 'Streaming' : 'Online') : 'Offline'}
+      {!compact && `${shortDeviceId(id)} · `}
+      {device?.online
+        ? device.streaming
+          ? device.message
+          : 'Online'
+        : 'Offline'}
     </span>
   );
 }
@@ -60,7 +70,6 @@ export function PhysicalLightsDialog({
     >
       <div className="physical-heading">
         <div>
-          <span className="eyebrow mono">LOCAL WI-FI / ESP32</span>
           <h2 id="physical-title">
             {selected ? `Connect ${selected.name}` : 'Add a physical light'}
           </h2>
@@ -75,21 +84,17 @@ export function PhysicalLightsDialog({
         </button>
       </div>
       <p>
-        {selected
-          ? 'Choose the device that will receive this room light’s colors.'
-          : 'Choose an ESP32 to create a new room light with its own physical output.'}{' '}
-        Use Identify to check the LED, then save your room.
+        Choose a light. Identify blinks its LED. Save Room applies the
+        connection.
       </p>
       {!store.hardware.available ? (
         <p className="hardware-notice">
-          Physical lights require the desktop app. Virtual lights remain
-          available in this browser preview.
+          Physical lights require the desktop app.
         </p>
       ) : (
         <>
           <p className="hardware-notice" role="status">
-            {state.discoveryError ??
-              'Discovering automatically on your local network…'}
+            {state.discoveryError ?? 'Searching for lights…'}
           </p>
           <button
             className="button button-outline"
@@ -99,8 +104,8 @@ export function PhysicalLightsDialog({
           </button>
           {!state.devices.length && (
             <p>
-              No ESP32 lights found yet. Connect the light to the same Wi-Fi
-              network and allow IOTensity local network access.
+              No lights found. Use the same Wi-Fi network and allow IOTensity
+              local network access.
             </p>
           )}
           <ul className="device-list">
@@ -113,12 +118,11 @@ export function PhysicalLightsDialog({
               return (
                 <li key={device.deviceId}>
                   <div className="device-description">
-                    <strong>{device.shortId}</strong>
+                    <strong title={device.deviceId}>{device.shortId}</strong>
                     <span>
                       {device.online ? device.message : 'Offline'}
                       {bound ? ` · ${bound.name}` : ''}
                     </span>
-                    <code>{device.deviceId}</code>
                   </div>
                   <div className="device-actions">
                     <button

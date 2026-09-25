@@ -17,7 +17,7 @@ test('both screens meet WCAG AA automated accessibility checks', async ({
       })),
     })),
   ).toEqual([]);
-  await page.getByRole('button', { name: 'Your Rooms 02' }).click();
+  await page.getByRole('button', { name: 'Your Rooms' }).click();
   await page.getByRole('button', { name: 'Add virtual light' }).click();
   const rooms = await new AxeBuilder({ page })
     .withTags(['wcag2a', 'wcag2aa', 'wcag21aa'])

@@ -7,10 +7,10 @@ import { LightCards } from './LightCards';
 import { OverlayControl } from './OverlayControl';
 
 const INTENSITY_COPY = {
-  subtle: '1.8 s smoothing. Slow, soft transitions.',
-  balanced: '800 ms smoothing. Gentle, natural transitions.',
-  vivid: '300 ms smoothing. Quick, expressive transitions.',
-  punch: '80 ms smoothing. Fastest response to the screen.',
+  subtle: '1.8 s transitions',
+  balanced: '800 ms transitions',
+  vivid: '300 ms transitions',
+  punch: '80 ms transitions',
 };
 
 function TransportDisplay() {
@@ -21,10 +21,6 @@ function TransportDisplay() {
         <span className={`status-dot ${state.running ? 'active' : ''}`} />
         <span className="mono">{state.syncStatus.toUpperCase()}</span>
       </div>
-      <span className="timecode">SCREEN SYNC</span>
-      <span className="display-bottom mono">
-        NATIVE COLOR / SAVED POSITIONS
-      </span>
     </div>
   );
 }
@@ -38,18 +34,7 @@ export function SyncPage() {
     <section className="page sync-page" aria-labelledby="sync-title">
       <header className="page-heading">
         <div>
-          <p className="eyebrow mono">CONTROL / 01</p>
-          <h1 id="sync-title">
-            Sync<span className="title-dot">.</span>
-          </h1>
-          <p className="page-description">Your space. In a different light.</p>
-        </div>
-        <div className="mode-tag">
-          <span className="mode-symbol">S</span>
-          <div>
-            <strong>Screen sync</strong>
-            <span>Virtual and physical outputs.</span>
-          </div>
+          <h1 id="sync-title">Sync</h1>
         </div>
       </header>
       <div className="sync-workspace">
@@ -59,7 +44,6 @@ export function SyncPage() {
               <div className="scene-title">
                 <span className="status-dot" />
                 <span>{room.name}</span>
-                <span className="scene-caption mono">LIVE PREVIEW</span>
               </div>
               <button
                 className="scene-icon-button"
@@ -82,12 +66,8 @@ export function SyncPage() {
             </div>
             {!room.lights.length && (
               <div className="sync-empty">
-                <h2>
-                  A room waiting
-                  <br />
-                  to come to life.
-                </h2>
-                <p>Place your first virtual light to get started.</p>
+                <h2>No lights</h2>
+                <p>Add and save lights to start sync.</p>
                 <button
                   className="button button-light"
                   onClick={() => void store.requestTransition('rooms')}
@@ -135,16 +115,12 @@ export function SyncPage() {
                   <i />
                   <i />
                 </span>
-                <span>Your saved lights will appear here.</span>
+                <span>No saved lights</span>
               </div>
             )}
           </div>
         </div>
         <aside className="sync-controls" aria-label="Sync controls">
-          <div className="panel-label mono">
-            <span>LIGHT ENGINE</span>
-            <span>01 — S</span>
-          </div>
           <label className="field-label" htmlFor="sync-source">
             Source
           </label>
@@ -162,9 +138,9 @@ export function SyncPage() {
               )
             }
           >
-            <option value="simulation">Synthetic color simulation</option>
-            <option value="test">Deterministic test image</option>
-            <option value="display">Main macOS display</option>
+            <option value="simulation">Animated colors</option>
+            <option value="test">Test image</option>
+            <option value="display">Main display</option>
           </select>
           <TransportDisplay />
           <p
@@ -172,9 +148,11 @@ export function SyncPage() {
             role={state.syncStatus === 'error' ? 'alert' : undefined}
             aria-live="polite"
           >
-            {store.output.available
-              ? state.syncMessage
-              : 'Desktop app required for native screen sync. Browser preview is editor-only.'}
+            {!store.output.available
+              ? 'Sync requires the desktop app.'
+              : ['starting', 'stopping', 'error'].includes(state.syncStatus)
+                ? state.syncMessage
+                : ''}
           </p>
           <button
             className={`start-button ${state.running ? 'is-running' : ''}`}
@@ -233,14 +211,9 @@ export function SyncPage() {
             <span>FULL</span>
           </div>
           <div className="control-divider" />
-          <p className="sync-note">
-            {state.syncSource === 'simulation'
-              ? 'Animated colors for virtual and physical light testing.'
-              : state.syncSource === 'test'
-                ? 'Test image: red / green above, blue / white below.'
-                : 'Play content on your main display. Open the mini room to watch your lights respond.'}{' '}
-            Save light positions to change their sampled areas.
-          </p>
+          {state.syncSource === 'test' && (
+            <p className="sync-note">Red / green above, blue / white below.</p>
+          )}
           <fieldset
             className="intensity-control"
             disabled={state.syncSource !== 'simulation'}
@@ -263,32 +236,24 @@ export function SyncPage() {
             <p>
               {state.syncSource === 'simulation'
                 ? INTENSITY_COPY[state.preferences.intensity]
-                : 'Screen and test-image colors update directly, without animation smoothing.'}
+                : 'Applies to animated colors only.'}
             </p>
           </fieldset>
 
           <OverlayControl />
-          <div className="control-bottom">
-            <div className="speaker-grille" aria-hidden="true" />
-            <span className="mono">
-              IOTENSITY
-              <br />
-              LOCAL LIGHT INSTRUMENT
-            </span>
-          </div>
         </aside>
       </div>
       <footer className="page-footer">
         <span>
           <Icon name="info" size={14} />
-          Saved X/Y positions map to the screen. Depth does not affect sampling.
+          Save positions to update sync. Depth does not affect screen colors.
         </span>
         <span className="mono">
           {state.preferenceSaving
             ? 'SAVING PREFERENCES…'
             : state.reducedMotion
               ? 'REDUCED MOTION'
-              : 'READY WHEN YOU ARE'}
+              : ''}
         </span>
       </footer>
     </section>

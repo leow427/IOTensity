@@ -13,6 +13,7 @@ import {
   NativeHardwareClient,
   type DevicesSnapshot,
   type HardwareClient,
+  type LightPreview,
   type NativeTransport,
 } from '../src/hardware/client';
 
@@ -22,6 +23,10 @@ export class FakeHardware implements HardwareClient {
   received?: (snapshot: DevicesSnapshot) => void;
   identified: string[] = [];
   retries = 0;
+  previews: (LightPreview | null)[] = [];
+  async preview(request: LightPreview | null) {
+    this.previews.push(request);
+  }
   async connect(receive: (snapshot: DevicesSnapshot) => void) {
     this.received = receive;
     this.update(true);
@@ -156,6 +161,43 @@ describe('physical identity and configuration', () => {
   });
 });
 describe('native hardware boundary', () => {
+  it('coalesces rapid placement edits and sends cancellation after an in-flight command', async () => {
+    const gate = deferred();
+    const calls: unknown[] = [];
+    const transport: NativeTransport = {
+      listen: async () => () => {},
+      invoke: async <T>(command: string, args?: Record<string, unknown>) => {
+        calls.push([command, structuredClone(args)]);
+        if (calls.length === 1) await gate.promise;
+        return undefined as T;
+      },
+    };
+    const client = new NativeHardwareClient(true, transport);
+    const request: LightPreview = {
+      deviceId: id,
+      position: { x: -3, y: 1.2, z: 1 },
+      mode: 'location',
+    };
+    const first = client.preview(request);
+    await Promise.resolve();
+    for (let i = 0; i < 100; i++)
+      void client.preview({
+        ...request,
+        position: { ...request.position, x: i / 100 },
+      });
+    const clear = client.preview(null);
+    gate.resolve();
+    await Promise.all([first, clear]);
+    expect(calls).toEqual([
+      ['set_light_preview', { preview: request }],
+      ['set_light_preview', { preview: null }],
+    ]);
+    await client.preview(request);
+    expect(calls).toHaveLength(3);
+    client.dispose();
+    await client.preview(null);
+    expect(calls.at(-1)).toEqual(['set_light_preview', { preview: null }]);
+  });
   it('uses a hardware ID for Identify and never lets an old snapshot regress discovery', async () => {
     const gate = deferred();
     let receive!: (value: DevicesSnapshot) => void;
@@ -184,5 +226,103 @@ describe('native hardware boundary', () => {
     expect(calls).toContainEqual(['identify_device', { deviceId: id }]);
     expect(calls).toContainEqual(['retry_hardware_discovery', undefined]);
     client.dispose();
+  });
+});
+
+describe('physical placement feedback', () => {
+  async function setupPreview() {
+    const persistence = new MemoryPersistence();
+    const hardware = new FakeHardware();
+    const store = new AppStore(persistence, new FakeOutput(), hardware);
+    stores.push(store);
+    await store.load();
+    await store.requestTransition('rooms');
+    store.addPhysicalLight(id);
+    return {
+      persistence,
+      hardware,
+      store,
+      logicalId: store.getSnapshot().selectedLightId!,
+    };
+  }
+
+  it('previews a new physical light and clamped edits without committing the draft', async () => {
+    const { persistence, hardware, store, logicalId } = await setupPreview();
+    expect(hardware.previews.at(-1)).toEqual({
+      deviceId: id,
+      position: { x: -1.7, y: 1.2, z: 1 },
+      mode: 'location',
+    });
+    store.moveLight(logicalId, { x: 9, y: 3, z: 2 });
+    expect(hardware.previews.at(-1)).toEqual({
+      deviceId: id,
+      position: { x: 3, y: 1.2, z: 2 },
+      mode: 'location',
+    });
+    store.setEditMode('height');
+    store.moveLight(logicalId, { x: 0, y: 9 });
+    expect(hardware.previews.at(-1)).toEqual({
+      deviceId: id,
+      position: { x: 3, y: 3, z: 2 },
+      mode: 'height',
+    });
+    expect(persistence.calls).toHaveLength(0);
+    expect(store.getSnapshot().saved!.rooms[0].lights).toHaveLength(0);
+    expect(store.getSnapshot().running).toBe(false);
+  });
+
+  it('clears feedback on deselect, virtual selection, save, guards, discard, navigation and stop', async () => {
+    const { hardware, store, logicalId } = await setupPreview();
+    await store.saveRoom();
+    expect(hardware.previews.at(-1)).toBeNull();
+    store.selectLight(logicalId);
+    store.setEditMode('height');
+    expect(store.dirty).toBe(false);
+    store.selectLight(null);
+    expect(hardware.previews.at(-1)).toBeNull();
+    store.selectLight(logicalId);
+    store.addLight();
+    expect(hardware.previews.at(-1)).toBeNull();
+    store.selectLight(logicalId);
+    await store.requestTransition('sync');
+    expect(hardware.previews.at(-1)).toBeNull();
+    expect(store.getSnapshot().pending).toBe('sync');
+    await store.resolveTransition('stay');
+    expect(hardware.previews.at(-1)).toBeNull();
+    store.selectLight(logicalId);
+    await store.requestTransition('discard');
+    await store.resolveTransition('discard');
+    expect(hardware.previews.at(-1)).toBeNull();
+    expect(store.dirty).toBe(false);
+    store.selectLight(logicalId);
+    await store.stop();
+    expect(hardware.previews.at(-1)).toBeNull();
+    store.selectLight(logicalId);
+    await store.requestTransition('sync');
+    expect(hardware.previews.at(-1)).toBeNull();
+    store.selectLight(logicalId);
+    expect(hardware.previews.at(-1)).toBeNull(); // The Sync page never starts editor feedback.
+  });
+
+  it('clears on unbinding/deletion and never previews an offline light or a frozen edit', async () => {
+    const { hardware, store, persistence, logicalId } = await setupPreview();
+    store.bindLight(logicalId, null);
+    expect(hardware.previews.at(-1)).toBeNull();
+    store.bindLight(logicalId, id);
+    hardware.update(false);
+    store.selectLight(logicalId);
+    expect(hardware.previews.at(-1)).toBeNull();
+    hardware.update(true);
+    store.selectLight(logicalId);
+    const gate = deferred();
+    persistence.gate = gate.promise;
+    const saving = store.saveRoom();
+    store.moveLight(logicalId, { x: 3 });
+    expect(hardware.previews.at(-1)).toBeNull();
+    gate.resolve();
+    await saving;
+    store.selectLight(logicalId);
+    store.deleteSelected();
+    expect(hardware.previews.at(-1)).toBeNull();
   });
 });

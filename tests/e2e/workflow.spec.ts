@@ -5,7 +5,7 @@ test('browser preview: save, isolate draft, discard, and label native sync unava
 }) => {
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Start Sync' })).toBeDisabled();
-  await page.getByRole('button', { name: 'Your Rooms 02' }).click();
+  await page.getByRole('button', { name: 'Your Rooms' }).click();
   await page.getByRole('button', { name: 'Add virtual light' }).click();
   await page.getByLabel('Name', { exact: true }).fill('Desk left');
   await page.getByRole('button', { name: 'Light Bar', exact: true }).click();
@@ -19,19 +19,19 @@ test('browser preview: save, isolate draft, discard, and label native sync unava
   await page.getByRole('button', { name: /Save Room/ }).click();
   await expect(page.getByRole('status')).toHaveText('✓ PREVIEW UPDATED');
   await page.getByLabel('Name', { exact: true }).fill('Uncommitted name');
-  await page.getByRole('button', { name: 'Sync 01' }).click();
+  await page.getByRole('button', { name: 'Sync' }).click();
   await expect(page.getByRole('dialog')).toBeVisible();
   await page.getByRole('button', { name: 'Stay', exact: true }).click();
   await expect(page.getByLabel('Name', { exact: true })).toHaveValue(
     'Uncommitted name',
   );
-  await page.getByRole('button', { name: 'Sync 01' }).click();
+  await page.getByRole('button', { name: 'Sync' }).click();
   await page.getByRole('button', { name: 'Discard', exact: true }).click();
   await expect(
     page.getByRole('group', { name: 'Saved virtual lights' }),
   ).toContainText('Desk left');
   await expect(page.getByRole('button', { name: 'Start Sync' })).toBeDisabled();
-  await expect(page.getByText(/Desktop app required/)).toBeVisible();
+  await expect(page.getByText(/Sync requires the desktop app/)).toBeVisible();
   await page.getByRole('button', { name: 'Punch intensity' }).click();
   await expect(
     page.getByRole('button', { name: 'Punch intensity' }),
@@ -42,7 +42,7 @@ test('browser preview: overflowing cards, keyboard selection and zero-brightness
   page,
 }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: 'Your Rooms 02' }).click();
+  await page.getByRole('button', { name: 'Your Rooms' }).click();
   for (let index = 0; index < 9; index++)
     await page.getByRole('button', { name: 'Add virtual light' }).click();
   const row = page.getByRole('group', { name: 'Virtual lights', exact: true });
@@ -70,9 +70,9 @@ test('browser preview: overflowing cards, keyboard selection and zero-brightness
   await expect(first).toHaveAttribute('aria-pressed', 'true');
   await expect(first).toBeInViewport();
   await page.getByRole('button', { name: /Save Room/ }).click();
-  await page.getByRole('button', { name: 'Sync 01' }).click();
+  await page.getByRole('button', { name: 'Sync' }).click();
   await page.getByLabel('Brightness', { exact: true }).fill('0');
-  await page.getByRole('button', { name: 'Your Rooms 02' }).click();
+  await page.getByRole('button', { name: 'Your Rooms' }).click();
   await expect(first).toHaveAttribute('style', /--light-color: rgb\((?!0 0 0)/);
   await page.getByRole('button', { name: 'Clear light selection' }).click();
   await expect(first).toHaveAttribute(
@@ -102,7 +102,7 @@ test('browser preview: renders WebGL and orbits without changing room data', asy
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto('/');
-  await page.getByRole('button', { name: 'Your Rooms 02' }).click();
+  await page.getByRole('button', { name: 'Your Rooms' }).click();
   await page.getByRole('button', { name: 'Add virtual light' }).click();
   await expect(page.locator('canvas')).toBeVisible();
   await expect(page.getByText('3D view unavailable')).not.toBeVisible();

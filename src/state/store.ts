@@ -26,6 +26,7 @@ import {
   NativeHardwareClient,
   type HardwareClient,
   type Device,
+  type LightPreview,
 } from '../hardware/client';
 
 export type Page = 'sync' | 'rooms';
@@ -89,6 +90,7 @@ export class AppStore {
   private preferenceTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingPreferenceWrites = 0;
   private disposed = false;
+  private previewGeneration = 0;
 
   constructor(
     readonly persistence: Persistence,
@@ -131,6 +133,7 @@ export class AppStore {
   }
 
   async load() {
+    this.clearLightPreview();
     this.set({ phase: 'loading', loadError: null });
     try {
       const saved = await this.persistence.load();
@@ -158,7 +161,44 @@ export class AppStore {
   }
   private edit(draft: Room, selectedLightId = this.state.selectedLightId) {
     if (!this.canEdit) return;
+    const previous = this.state.draft?.lights.find(
+      (light) => light.id === this.state.selectedLightId,
+    );
     this.set({ draft, selectedLightId, saveStatus: 'idle', saveError: null });
+    const next = draft.lights.find((light) => light.id === selectedLightId);
+    if (
+      previous?.id !== next?.id ||
+      previous?.output !== next?.output ||
+      previous?.position !== next?.position
+    )
+      this.previewSelected();
+  }
+  private sendLightPreview(request: LightPreview | null) {
+    const generation = ++this.previewGeneration;
+    void this.hardware.preview(request).catch((error) => {
+      if (generation === this.previewGeneration)
+        this.set({ hardwareError: errorMessage(error) });
+    });
+  }
+  clearLightPreview() {
+    this.sendLightPreview(null);
+  }
+  private previewSelected() {
+    const light = this.state.draft?.lights.find(
+      (light) => light.id === this.state.selectedLightId,
+    );
+    const deviceId =
+      light?.output.kind === 'esp32' ? light.output.deviceId : null;
+    this.sendLightPreview(
+      light &&
+        deviceId &&
+        this.canEdit &&
+        this.state.page === 'rooms' &&
+        !this.state.pending &&
+        this.state.devices.some((d) => d.deviceId === deviceId && d.online)
+        ? { deviceId, position: light.position, mode: this.state.editMode }
+        : null,
+    );
   }
   addLight() {
     const room = this.state.draft;
@@ -238,6 +278,7 @@ export class AppStore {
   }
   async identifyDevice(deviceId: string) {
     if (this.state.identifying) return;
+    this.clearLightPreview();
     this.set({ identifying: deviceId, hardwareError: null });
     try {
       await this.hardware.identify(deviceId);
@@ -254,9 +295,11 @@ export class AppStore {
     )
       return;
     this.set({ selectedLightId: id });
+    this.previewSelected();
   }
   setEditMode(editMode: EditMode) {
     this.set({ editMode });
+    this.previewSelected();
   }
   updateLight(id: string, patch: { name?: string; iconKind?: IconKind }) {
     const room = this.state.draft;
@@ -303,6 +346,7 @@ export class AppStore {
   }
   private discard() {
     if (!this.state.saved) return;
+    this.clearLightPreview();
     const draft = clone(this.state.saved.rooms[0]);
     const selectedLightId = draft.lights.some(
       (light) => light.id === this.state.selectedLightId,
@@ -333,6 +377,7 @@ export class AppStore {
   }
   async saveRoom(): Promise<boolean> {
     if (!this.state.draft || !this.canEdit) return false;
+    this.clearLightPreview();
     if (!this.dirty) return true;
     const snapshot = clone(this.state.draft);
     this.set({ saveStatus: 'saving', saveError: null });
@@ -402,6 +447,7 @@ export class AppStore {
   async start() {
     if (this.state.syncBusy || !this.state.saved?.rooms[0].lights.length)
       return;
+    this.clearLightPreview();
     this.set({ syncBusy: true });
     try {
       await this.output.start(this.state.syncSource, this.state.reducedMotion);
@@ -416,6 +462,7 @@ export class AppStore {
   }
   async stop() {
     if (this.state.syncBusy) return;
+    this.clearLightPreview();
     this.set({ syncBusy: true });
     try {
       await this.output.stop();
@@ -431,6 +478,7 @@ export class AppStore {
 
   async requestTransition(destination: Destination) {
     if (destination === this.state.page) return;
+    this.clearLightPreview();
     if (this.dirty || this.state.saveStatus === 'saving') {
       this.set({ pending: destination });
       return;
@@ -462,6 +510,7 @@ export class AppStore {
     this.set({ readyToClose: false, preferenceError: errorMessage(error) });
   }
   dispose() {
+    this.clearLightPreview();
     this.disposed = true;
     if (this.preferenceTimer) clearTimeout(this.preferenceTimer);
     this.output.dispose();

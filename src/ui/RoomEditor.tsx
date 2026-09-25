@@ -89,11 +89,7 @@ export function RoomEditor() {
     <section className="page rooms-page" aria-labelledby="rooms-title">
       <header className="page-heading">
         <div>
-          <p className="eyebrow mono">SPACE / 02</p>
-          <h1 id="rooms-title">
-            Your Rooms<span className="title-dot">.</span>
-          </h1>
-          <p className="page-description">Give every light a place.</p>
+          <h1 id="rooms-title">Your Rooms</h1>
         </div>
         <div className="save-actions">
           <span
@@ -137,7 +133,6 @@ export function RoomEditor() {
               <div className="scene-title">
                 <span className="status-dot" />
                 <span>{room.name}</span>
-                <span className="scene-caption mono">ROOM 01</span>
               </div>
               <div className="scene-actions">
                 <button
@@ -180,11 +175,7 @@ export function RoomEditor() {
             {!room.lights.length && (
               <div className="stage-empty-note">
                 <span className="small-cross">+</span>
-                <p>
-                  Your space is ready.
-                  <br />
-                  <strong>Add your first virtual light.</strong>
-                </p>
+                <p>Add a virtual or physical light.</p>
               </div>
             )}
             <div className="scene-bottomline">
@@ -201,12 +192,11 @@ export function RoomEditor() {
           <div className="light-tray">
             <div className="tray-heading">
               <span className="eyebrow mono">
-                YOUR LIGHTS{' '}
+                LIGHTS{' '}
                 <span className="count-badge">
                   {String(room.lights.length).padStart(2, '0')}
                 </span>
               </span>
-              <span className="tray-hint">Select a light to position it</span>
             </div>
             {(['virtual', 'esp32'] as const).map((kind) => {
               const lights = room.lights.filter(
@@ -230,7 +220,6 @@ export function RoomEditor() {
               <button className="empty-card" onClick={() => store.addLight()}>
                 <Icon name="plus" size={24} />
                 <span>Add a virtual light</span>
-                <small>Start with a little glow.</small>
               </button>
             )}
           </div>
@@ -250,12 +239,6 @@ export function RoomEditor() {
               </div>
               <div className="inspector-light-icon">
                 <LightIcon kind={light.iconKind} size={43} />
-                <span className="mono">
-                  {light.output.kind === 'virtual' ? 'VIRTUAL' : 'PHYSICAL'} /{' '}
-                  {String(
-                    room.lights.findIndex((item) => item.id === light.id) + 1,
-                  ).padStart(2, '0')}
-                </span>
               </div>
               <label className="field-label" htmlFor="light-name">
                 Name
@@ -402,8 +385,6 @@ export function RoomEditor() {
                     {state.editMode === 'location'
                       ? 'Green to orange shows left to right.'
                       : 'Cyan to violet shows floor to ceiling.'}
-                    <br />
-                    This color is a placement guide.
                   </span>
                 </p>
               </div>
@@ -416,38 +397,15 @@ export function RoomEditor() {
                   <Icon name="trash" size={15} />
                   Delete light
                 </button>
-                <span className="mono">
-                  {light.position.x.toFixed(2)} / {light.position.y.toFixed(2)}{' '}
-                  / {light.position.z.toFixed(2)}
-                </span>
               </div>
             </>
           ) : (
             <div className="inspector-empty">
-              <span className="eyebrow mono">LIGHT SETTINGS</span>
               <div className="empty-light-symbol">
                 <LightIcon kind="bulb" size={52} />
               </div>
-              <h2>
-                A place for
-                <br />
-                every light.
-              </h2>
-              <p>
-                Add a virtual light, then select its orb or card to fine-tune
-                the position.
-              </p>
-              <div className="empty-instruction">
-                <Icon name="move" />
-                <span>Move around the room</span>
-              </div>
-              <div className="empty-instruction">
-                <Icon name="height" />
-                <span>Set the right height</span>
-              </div>
-              <div className="inspector-empty-foot mono">
-                YOUR ROOM. YOUR ARRANGEMENT.
-              </div>
+              <h2>Select a light</h2>
+              <p>Drag its orb or use the position controls.</p>
             </div>
           )}
         </aside>

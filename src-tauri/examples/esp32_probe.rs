@@ -1,8 +1,11 @@
 //! Run against scripts/esp32-emulator.py --test-api (never against an actual LED).
 //! Uses production discovery/control/UDP and a temporary on-disk configuration.
 use iotensity_lib::{
-    config::{ConfigStore, Configuration, LightOutput},
-    hardware::HardwareService,
+    config::{ConfigStore, Configuration, LightOutput, Position},
+    hardware::{
+        preview::{EditMode, PreviewRequest},
+        HardwareService,
+    },
     sync::processing::LightColor,
 };
 use std::{
@@ -50,6 +53,27 @@ fn status(client: &reqwest::blocking::Client, endpoint: &str) -> serde_json::Val
         .json()
         .unwrap()
 }
+fn preview(x: f64) -> PreviewRequest {
+    PreviewRequest {
+        device_id: ID.into(),
+        position: Position { x, y: 1.2, z: 1.0 },
+        mode: EditMode::Location,
+    }
+}
+fn wait_rgb(client: &reqwest::blocking::Client, endpoint: &str, rgb: [u8; 3]) -> serde_json::Value {
+    let start = Instant::now();
+    loop {
+        let current = status(client, endpoint);
+        if current["rgb"] == serde_json::json!(rgb) {
+            return current;
+        }
+        assert!(
+            start.elapsed() < Duration::from_millis(1500),
+            "Expected {rgb:?}, got {current}"
+        );
+        thread::sleep(Duration::from_millis(30));
+    }
+}
 fn main() {
     let endpoint = std::env::args()
         .nth(1)
@@ -71,8 +95,30 @@ fn main() {
     };
     let saved = disk.save(config, 0).unwrap();
     let service = HardwareService::spawn(|_| {}).unwrap();
-    service.apply_saved(saved);
     online(&service);
+    // Positioning works before the device has any saved binding and while Sync
+    // continuously publishes its stopped state, as the desktop app does.
+    service.preview(Some(preview(-3.0))).unwrap();
+    let unbound = wait_rgb(&client, &endpoint, [64, 232, 135]);
+    for _ in 0..15 {
+        service.publish(&[], false);
+        service.preview(Some(preview(3.0))).unwrap();
+        thread::sleep(Duration::from_millis(20));
+    }
+    let moved = wait_rgb(&client, &endpoint, [255, 89, 31]);
+    assert_eq!(moved["sessionId"], unbound["sessionId"]);
+    service.preview(None).unwrap();
+    wait_rgb(&client, &endpoint, [0, 0, 0]);
+    service.preview(Some(preview(-3.0))).unwrap();
+    wait_rgb(&client, &endpoint, [64, 232, 135]);
+    thread::sleep(Duration::from_millis(2200));
+    wait_rgb(&client, &endpoint, [0, 0, 0]);
+    assert!(!service
+        .devices()
+        .devices
+        .iter()
+        .any(|d| d.device_id == ID && d.streaming));
+    service.apply_saved(saved);
     service.identify(ID).unwrap();
     assert!(
         status(&client, &endpoint)["identifyCount"]
@@ -81,6 +127,15 @@ fn main() {
             > 0
     );
     feed(&service, [64, 128, 192], 1.2);
+    let first = status(&client, &endpoint);
+    assert_eq!(first["rgb"], serde_json::json!([64, 128, 192]));
+    service.preview(Some(preview(3.0))).unwrap();
+    feed(&service, [64, 128, 192], 0.3);
+    let positioned = status(&client, &endpoint);
+    assert_eq!(positioned["rgb"], serde_json::json!([255, 89, 31]));
+    assert_eq!(positioned["sessionId"], first["sessionId"]);
+    service.preview(None).unwrap();
+    feed(&service, [64, 128, 192], 0.3);
     let first = status(&client, &endpoint);
     assert_eq!(first["rgb"], serde_json::json!([64, 128, 192]));
     let before = first["acceptedFrames"].as_u64().unwrap();
@@ -154,5 +209,5 @@ fn main() {
         serde_json::json!([0, 0, 0])
     );
     restarted.shutdown();
-    println!("PASS: mDNS, Identify, exact RGB, {fps:.1} FPS static keepalive, receiver reboot, offline retention/recovery, disk binding/app restart, explicit stop and source timeout");
+    println!("PASS: unsaved placement colors, stable preview session, cancellation, preview expiry, sync restoration, mDNS, Identify, exact RGB, {fps:.1} FPS static keepalive, receiver reboot, offline retention/recovery, disk binding/app restart, explicit stop and source timeout");
 }

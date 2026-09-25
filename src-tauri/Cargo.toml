@@ -1,7 +1,7 @@
 [package]
 name = "iotensity"
 version = "0.1.0"
-description = "A desktop instrument for virtual light and atmosphere"
+description = "Local ESP32 lighting and screen sync"
 authors = ["IOTensity"]
 edition = "2021"
 

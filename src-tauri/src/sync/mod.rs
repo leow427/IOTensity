@@ -45,7 +45,7 @@ impl Default for Snapshot {
             sequence: 0,
             source: Source::Simulation,
             status: Status::Stopped,
-            message: "Ready. Save a room, then start sync.".into(),
+            message: "".into(),
             colors: vec![],
         }
     }
@@ -85,14 +85,12 @@ impl SyncService {
                         Status::Starting | Status::Running => {
                             if rt.snapshot.source == Source::Simulation {
                                 rt.snapshot.status = Status::Running;
-                                rt.snapshot.message =
-                                    "Synthetic colors · native output · up to 30 FPS".into();
+                                rt.snapshot.message = "Animated colors".into();
                             } else if rt.snapshot.source == Source::Test {
                                 if rt.snapshot.status == Status::Starting {
                                     rt.processor.image = Some(generated_image());
                                     rt.snapshot.status = Status::Running;
-                                    rt.snapshot.message =
-                                        "Test image · native output · 30 Hz target".into();
+                                    rt.snapshot.message = "Test image".into();
                                 }
                             } else {
                                 #[cfg(target_os = "macos")]
@@ -107,10 +105,7 @@ impl SyncService {
                                     } else if let Some(frame) = stream.take_latest() {
                                         match frame {
                                             Ok(image) => {
-                                                rt.snapshot.message = format!(
-                                                    "Main display · {}×{} sampling · SDR · IOTensity excluded · 30 Hz target",
-                                                    image.width, image.height
-                                                );
+                                                rt.snapshot.message = "Main display".into();
                                                 rt.processor.image = Some(image);
                                                 rt.snapshot.status = Status::Running;
                                             }
@@ -173,7 +168,7 @@ impl SyncService {
                             }
                             if stopped {
                                 rt.snapshot.status = Status::Stopped;
-                                rt.snapshot.message = "Stopped · last colors held".into();
+                                rt.snapshot.message = "".into();
                                 rt.processor.image = None;
                             }
                             rt.snapshot.sequence += 1;
@@ -234,11 +229,8 @@ impl SyncService {
         rt.snapshot.status = Status::Starting;
         rt.processor.image = None;
         rt.snapshot.message = match source {
-            Source::Simulation => "Starting synthetic colors…",
-            Source::Test => "Starting native output…",
-            Source::Display => {
-                "Starting main display capture. macOS may request Screen Recording permission…"
-            }
+            Source::Simulation | Source::Test => "Starting…",
+            Source::Display => "Starting capture… Allow Screen Recording if prompted.",
         }
         .into();
         rt.snapshot.sequence += 1;

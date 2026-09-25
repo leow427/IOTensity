@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import fixture from './fixtures/configuration.json';
+import placementColors from './fixtures/placement-colors.json';
 import {
   BOUNDS,
   clone,
@@ -9,6 +10,7 @@ import {
   roomIsDirty,
   validateConfiguration,
   type Configuration,
+  type EditMode,
 } from '../src/domain/model';
 import {
   calibrationColor,
@@ -93,6 +95,17 @@ describe('shared configuration and coordinates', () => {
 });
 
 describe('calibration', () => {
+  it('matches the RGB8 placement colors used by the native ESP32 preview', () => {
+    const light = createLight(defaultConfiguration().rooms[0]);
+    for (const { mode, position, rgb } of placementColors) {
+      light.position = position;
+      expect(
+        resolveColor(light, [0, 0, 0], mode as EditMode).map((c) =>
+          Math.round(c * 255),
+        ),
+      ).toEqual(rgb);
+    }
+  });
   it('interpolates continuously in X and is independent of Z', () => {
     const light = createLight(defaultConfiguration().rooms[0]);
     light.position.x = BOUNDS.x[0];

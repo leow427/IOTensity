@@ -1,6 +1,7 @@
 pub mod control;
 mod discovery;
 pub mod engine;
+pub mod preview;
 pub mod protocol;
 
 use crate::config::{valid_device_id, Configuration, LightOutput};
@@ -56,8 +57,85 @@ struct State {
     devices: BTreeMap<String, Device>,
     discovery_error: Option<String>,
     last_frame: Option<Instant>,
+    preview: Option<preview::Preview>,
 }
 impl State {
+    fn color(&self, id: &str) -> Option<(String, [u8; 3])> {
+        if let Some(preview) = self.preview.as_ref().filter(|p| p.device_id == id) {
+            return Some((
+                self.binding(id).unwrap_or_else(|| format!("preview-{id}")),
+                preview.rgb,
+            ));
+        }
+        if !self.output.running {
+            return None;
+        }
+        let light_id = self.binding(id)?;
+        self.output
+            .colors
+            .iter()
+            .find(|c| c.id == light_id)
+            .map(|c| (light_id, c.rgb))
+    }
+    fn prune_targets(&mut self) {
+        let desired: HashMap<_, _> = self
+            .devices
+            .keys()
+            .map(|id| (id.clone(), self.color(id).map(|(light_id, _)| light_id)))
+            .collect();
+        for (id, device) in &mut self.devices {
+            if device
+                .connection
+                .target
+                .as_ref()
+                .is_some_and(|target| desired[id].as_ref() != Some(&target.light_id))
+            {
+                device.connection.target = None;
+            }
+        }
+    }
+    fn expire(&mut self, now: Instant) {
+        if self.preview.as_ref().is_some_and(|p| now >= p.expires) {
+            self.preview = None;
+        }
+        if self.output.running
+            && self
+                .last_frame
+                .is_none_or(|last| now.duration_since(last) > Duration::from_millis(250))
+        {
+            self.output.running = false;
+            self.epoch += 1;
+        }
+        self.prune_targets();
+    }
+    fn set_preview(
+        &mut self,
+        request: Option<preview::PreviewRequest>,
+        now: Instant,
+    ) -> Result<(), String> {
+        // Even a failed replacement must release the previous selected light.
+        self.preview = None;
+        let result = (|| {
+            if let Some(request) = request {
+                let rgb = request.color()?;
+                if !self
+                    .devices
+                    .get(&request.device_id)
+                    .is_some_and(|d| d.connection.online)
+                {
+                    return Err("Light is offline.".into());
+                }
+                self.preview = Some(preview::Preview {
+                    device_id: request.device_id,
+                    rgb,
+                    expires: now + preview::PREVIEW_DURATION,
+                });
+            }
+            Ok(())
+        })();
+        self.prune_targets();
+        result
+    }
     fn reset_discovery(&mut self, network_changed: bool) {
         for device in self.devices.values_mut() {
             if network_changed || !device.connection.online {
@@ -83,10 +161,8 @@ impl State {
         endpoints.dedup();
         Some(Wish {
             epoch: self.epoch,
-            light_id: self
-                .binding(id)
-                .filter(|light_id| self.output.colors.iter().any(|color| &color.id == light_id)),
-            running: self.output.running,
+            light_id: self.color(id).map(|(light_id, _)| light_id),
+            running: self.color(id).is_some(),
             endpoints,
         })
     }
@@ -101,8 +177,12 @@ impl State {
                     short_id: format!("IOT-{}", id[12..].to_uppercase()),
                     model: "esp32-rgb".into(),
                     online: device.connection.online,
-                    streaming: self.output.running && device.connection.target.is_some(),
-                    message: if device.connection.message.is_empty() {
+                    streaming: self.color(id).is_some() && device.connection.target.is_some(),
+                    message: if self.preview.as_ref().is_some_and(|p| &p.device_id == id)
+                        && device.connection.target.is_some()
+                    {
+                        "Position preview".into()
+                    } else if device.connection.message.is_empty() {
                         "Offline · waiting for discovery".into()
                     } else {
                         device.connection.message.clone()
@@ -170,27 +250,12 @@ impl HardwareService {
             }
             state.devices.entry(id).or_default();
         }
-        let running = state.output.running;
-        let bindings: HashMap<_, _> = state
-            .devices
-            .keys()
-            .map(|id| (id.clone(), state.binding(id)))
-            .collect();
-        for (id, device) in &mut state.devices {
-            if !running
-                || device
-                    .connection
-                    .target
-                    .as_ref()
-                    .is_some_and(|t| bindings[id].as_ref() != Some(&t.light_id))
-            {
-                device.connection.target = None;
-            }
-        }
+        state.preview = None;
         if state.config.rooms.iter().all(|r| r.lights.is_empty()) {
             state.output.running = false;
             state.epoch += 1;
         }
+        state.prune_targets();
     }
     pub fn snapshot(&self) -> OutputSnapshot {
         self.0.state.lock().unwrap().output.clone()
@@ -200,6 +265,16 @@ impl HardwareService {
     }
     pub fn retry_discovery(&self) {
         self.0.retry_discovery.store(true, Ordering::Release);
+    }
+    pub fn preview(&self, request: Option<preview::PreviewRequest>) -> Result<(), String> {
+        if self.is_shutdown() {
+            return Err("App is closing.".into());
+        }
+        self.0
+            .state
+            .lock()
+            .unwrap()
+            .set_preview(request, Instant::now())
     }
     pub fn set_reduced_motion(&self, reduced_motion: bool) {
         self.0.state.lock().unwrap().reduced_motion = reduced_motion;
@@ -214,6 +289,7 @@ impl HardwareService {
         state.output.running = running;
         state.output.sequence += 1;
         if !running {
+            state.preview = None;
             for device in state.devices.values_mut() {
                 device.connection.target = None;
             }
@@ -262,11 +338,7 @@ impl HardwareService {
                 rgb: c.rgb,
             })
             .collect();
-        if !running {
-            for device in state.devices.values_mut() {
-                device.connection.target = None;
-            }
-        }
+        state.prune_targets();
     }
     fn output_loop(&self) {
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).and_then(|socket| {
@@ -279,47 +351,37 @@ impl HardwareService {
         }
         let mut sequences: HashMap<String, (protocol::Session, u32)> = HashMap::new();
         while !self.is_shutdown() {
-            let (frame, targets) = {
+            let targets = {
                 let mut state = self.0.state.lock().unwrap();
-                if state.output.running
-                    && state
-                        .last_frame
-                        .is_none_or(|last| last.elapsed() > Duration::from_millis(250))
-                {
-                    state.output.running = false;
-                    state.epoch += 1;
-                    for device in state.devices.values_mut() {
-                        device.connection.target = None;
-                    }
-                }
-                let targets: Vec<_> = state
+                state.expire(Instant::now());
+                // Keep the sequence through a transient control failure that may
+                // recover the same session via an idempotent start retry.
+                sequences.retain(|id, _| state.devices.contains_key(id));
+                state
                     .devices
-                    .values()
-                    .filter_map(|d| d.connection.target.clone())
-                    .filter(|_| state.output.running)
-                    .collect();
-                (state.output.clone(), targets)
+                    .iter()
+                    .filter_map(|(id, device)| {
+                        let target = device.connection.target.clone()?;
+                        let (light_id, rgb) = state.color(id)?;
+                        (target.light_id == light_id).then(|| (id.clone(), target, rgb))
+                    })
+                    .collect::<Vec<_>>()
             };
-            sequences.retain(|id, _| frame.colors.iter().any(|c| c.id == *id));
             if let Ok(socket) = &socket {
-                for target in targets {
-                    if let Some(color) = frame.colors.iter().find(|c| c.id == target.light_id) {
-                        let entry = sequences
-                            .entry(target.light_id.clone())
-                            .or_insert((target.session, 0));
-                        if entry.0 != target.session {
-                            *entry = (target.session, 0);
-                        }
-                        let packet = protocol::Frame {
-                            session: target.session,
-                            sequence: entry.1,
-                            rgb: color.rgb,
-                        }
-                        .encode();
-                        // A dropped send is replaced by the next complete frame; no queue or retry.
-                        let _ = socket.send_to(&packet, target.address);
-                        entry.1 = entry.1.wrapping_add(1);
+                for (id, target, rgb) in targets {
+                    let entry = sequences.entry(id).or_insert((target.session, 0));
+                    if entry.0 != target.session {
+                        *entry = (target.session, 0);
                     }
+                    let packet = protocol::Frame {
+                        session: target.session,
+                        sequence: entry.1,
+                        rgb,
+                    }
+                    .encode();
+                    // A dropped send is replaced by the next complete frame; no queue or retry.
+                    let _ = socket.send_to(&packet, target.address);
+                    entry.1 = entry.1.wrapping_add(1);
                 }
             }
             // No catch-up bursts after a slow frame or sleep/wake. Static colors repeat too.
@@ -580,6 +642,141 @@ mod tests {
             id: logical_id.clone(),
             rgb: [1, 2, 3],
         });
+        state.output.running = true;
         assert_eq!(state.wish(&id).unwrap().light_id, Some(logical_id));
+    }
+
+    fn preview_request(id: &str, x: f64) -> preview::PreviewRequest {
+        preview::PreviewRequest {
+            device_id: id.into(),
+            position: crate::config::Position { x, y: 1.2, z: 1.0 },
+            mode: preview::EditMode::Location,
+        }
+    }
+
+    fn online_device() -> Device {
+        Device {
+            connection: ConnectionState {
+                online: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn unsaved_preview_renews_without_reconnecting_and_expires_without_sync() {
+        let id = "esp32-020000a1b2c3";
+        let other = "esp32-020000112233";
+        let mut state = State::default();
+        state.devices.insert(id.into(), online_device());
+        state.devices.insert(other.into(), online_device());
+        let saved = state.config.clone();
+        let now = Instant::now();
+        state
+            .set_preview(Some(preview_request(id, -3.0)), now)
+            .unwrap();
+        let wish = state.wish(id).unwrap();
+        assert!(wish.running);
+        assert!(!state.wish(other).unwrap().running);
+        assert_eq!(state.color(id).unwrap().1, [64, 232, 135]);
+        state
+            .set_preview(Some(preview_request(id, 3.0)), now + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(state.wish(id).unwrap(), wish); // No session change for every mouse movement.
+        assert_eq!(state.color(id).unwrap().1, [255, 89, 31]);
+        state.expire(now + preview::PREVIEW_DURATION);
+        assert!(state.wish(id).unwrap().running); // Last edit renewed the lease.
+        state.expire(now + Duration::from_secs(3));
+        assert!(!state.wish(id).unwrap().running);
+        assert_ne!(state.wish(id).unwrap(), wish); // An in-flight start must be discarded.
+        assert!(state.color(id).is_none());
+        assert_eq!(state.config, saved);
+        assert!(!state.output.running);
+    }
+
+    #[test]
+    fn selection_switch_cancel_and_invalid_requests_release_previous_light() {
+        let id = "esp32-020000a1b2c3";
+        let other = "esp32-020000112233";
+        let mut state = State::default();
+        state.devices.insert(id.into(), online_device());
+        state.devices.insert(other.into(), online_device());
+        let now = Instant::now();
+        state
+            .set_preview(Some(preview_request(id, 0.0)), now)
+            .unwrap();
+        let old_wish = state.wish(id).unwrap();
+        state.devices.get_mut(id).unwrap().connection.target = Some(control::Target {
+            light_id: old_wish.light_id.clone().unwrap(),
+            address: "192.168.1.20:49600".parse().unwrap(),
+            session: [1; 16],
+        });
+        state
+            .set_preview(Some(preview_request(other, 1.0)), now)
+            .unwrap();
+        assert_ne!(state.wish(id).unwrap(), old_wish);
+        assert!(state.devices[id].connection.target.is_none());
+        assert!(state.color(id).is_none());
+        assert!(state.color(other).is_some());
+        state.set_preview(None, now).unwrap();
+        assert!(state.color(other).is_none());
+        state
+            .set_preview(Some(preview_request(id, 0.0)), now)
+            .unwrap();
+        assert!(state
+            .set_preview(Some(preview_request(other, 99.0)), now)
+            .is_err());
+        assert!(state.color(id).is_none());
+        state.devices.get_mut(other).unwrap().connection.online = false;
+        assert!(state
+            .set_preview(Some(preview_request(other, 0.0)), now)
+            .is_err());
+    }
+
+    #[test]
+    fn preview_overrides_only_selected_device_then_resumes_saved_output() {
+        let config: Configuration =
+            serde_json::from_str(include_str!("../../../tests/fixtures/configuration.json"))
+                .unwrap();
+        let light = config.rooms[0].lights.last().unwrap();
+        let LightOutput::Esp32 { device_id } = &light.output else {
+            panic!("physical fixture")
+        };
+        let id = device_id.clone();
+        let logical_id = light.id.clone();
+        let now = Instant::now();
+        let mut state = State {
+            config,
+            last_frame: Some(now),
+            ..Default::default()
+        };
+        state.devices.insert(id.clone(), online_device());
+        state.output.running = true;
+        state.output.colors.push(engine::Color {
+            id: logical_id,
+            rgb: [10, 20, 30],
+        });
+        let saved = state.config.clone();
+        let before = state.wish(&id).unwrap();
+        state
+            .set_preview(Some(preview_request(&id, -3.0)), now)
+            .unwrap();
+        assert_eq!(state.wish(&id).unwrap(), before);
+        assert_eq!(state.color(&id).unwrap().1, [64, 232, 135]);
+        let end = now + preview::PREVIEW_DURATION;
+        state.last_frame = Some(end);
+        state.expire(end);
+        assert_eq!(state.wish(&id).unwrap(), before);
+        assert_eq!(state.color(&id).unwrap().1, [10, 20, 30]);
+        assert_eq!(state.config, saved);
+        // A stale sync source still stops, including when a placement preview exists.
+        state
+            .set_preview(Some(preview_request(&id, 0.0)), end)
+            .unwrap();
+        state.expire(end + Duration::from_millis(251));
+        assert!(!state.output.running);
+        state.expire(end + preview::PREVIEW_DURATION);
+        assert!(state.color(&id).is_none());
     }
 }

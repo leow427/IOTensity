@@ -29,19 +29,13 @@ function UnsavedDialog() {
       aria-labelledby="dialog-title"
       aria-describedby="dialog-copy"
     >
-      <span className="eyebrow mono">YOUR ROOM / UNSAVED CHANGES</span>
-      <div className="dialog-symbol">
-        <Icon name="room" size={30} />
-      </div>
       <h2 id="dialog-title">
-        {discardOnly
-          ? 'Back to your saved room?'
-          : 'Keep your new arrangement?'}
+        {discardOnly ? 'Discard changes?' : 'Save changes?'}
       </h2>
       <p id="dialog-copy">
         {discardOnly
-          ? 'This will restore your last saved room, including light names, appearances, and positions.'
-          : 'Your room has unsaved changes. Save them before leaving, or discard them to keep your last saved arrangement.'}
+          ? 'Your last saved room will be restored.'
+          : 'Your room has unsaved changes.'}
       </p>
       <div className="dialog-actions">
         <button
@@ -92,12 +86,14 @@ export function App() {
     const beforeunload = (event: BeforeUnloadEvent) => {
       if (store.dirty) event.preventDefault();
     };
+    const blur = () => store.clearLightPreview();
     const media = window.matchMedia('(prefers-reduced-motion: reduce)');
     const motion = () => store.setReducedMotion(media.matches);
     motion();
     media.addEventListener('change', motion);
     window.addEventListener('keydown', keydown);
     window.addEventListener('beforeunload', beforeunload);
+    window.addEventListener('blur', blur);
     let gone = false;
     let unlisten: (() => void) | undefined;
     if (isTauri())
@@ -117,6 +113,7 @@ export function App() {
       media.removeEventListener('change', motion);
       window.removeEventListener('keydown', keydown);
       window.removeEventListener('beforeunload', beforeunload);
+      window.removeEventListener('blur', blur);
     };
   }, [store]);
   useEffect(() => {
@@ -132,21 +129,16 @@ export function App() {
         <div className="brand">
           <BrandMark />
           <span>IOTensity</span>
-          <span className="brand-divider" />
-          <span className="brand-model mono">LIGHT / SPACE</span>
         </div>
-        <div className="titlebar-status mono">
-          <span className="status-dot" />
-          {store.persistence.kind === 'native'
-            ? 'LOCAL INSTRUMENT'
-            : 'BROWSER PREVIEW · NOT SAVED TO DISK'}
-          <span className="version">V.01</span>
-        </div>
+        {store.persistence.kind !== 'native' && (
+          <div className="titlebar-status mono">
+            Browser preview · Changes are not saved to disk
+          </div>
+        )}
       </header>
       <div className="app-body">
         <aside className="sidebar">
           <div>
-            <p className="sidebar-label mono">WORKSPACE</p>
             <nav aria-label="Main navigation">
               <button
                 className={state.page === 'sync' ? 'active' : ''}
@@ -156,7 +148,6 @@ export function App() {
               >
                 <Icon name="sync" />
                 <span>Sync</span>
-                <span className="nav-index mono">01</span>
               </button>
               <button
                 className={state.page === 'rooms' ? 'active' : ''}
@@ -166,40 +157,25 @@ export function App() {
               >
                 <Icon name="room" />
                 <span>Your Rooms</span>
-                <span className="nav-index mono">02</span>
               </button>
             </nav>
-          </div>
-          <div className="sidebar-bottom">
-            <div className="sidebar-device">
-              <span className="device-line" />
-              <span className="device-ring" />
-              <span className="device-mini-led" />
-            </div>
-            <span className="sidebar-edition mono">IO—01</span>
-            <span className="sidebar-caption">
-              A little light.
-              <br />A different atmosphere.
-            </span>
-            <span className="sidebar-foot mono">DESIGNED FOR YOUR SPACE</span>
           </div>
         </aside>
         <main>
           {state.phase === 'loading' && (
             <div className="app-message">
               <BrandMark />
-              <h1>Setting the scene.</h1>
-              <p>Loading your saved room…</p>
+              <h1>Loading room…</h1>
             </div>
           )}
           {state.phase === 'error' && (
             <div className="app-message">
               <Icon name="info" size={32} />
-              <h1>We couldn’t load your room.</h1>
+              <h1>Couldn’t load room</h1>
               <p role="alert">{state.loadError}</p>
               <p>
-                Your configuration hasn’t been replaced. Restore a valid file in
-                the application data folder, then retry.
+                Restore a valid configuration file in the application data
+                folder, then retry.
               </p>
               <button
                 className="button button-dark"

@@ -86,8 +86,24 @@ fn start_sync(
     sync.start(source)
 }
 #[tauri::command]
-fn stop_sync(sync: tauri::State<'_, sync::SyncService>) -> sync::Snapshot {
+fn stop_sync(
+    sync: tauri::State<'_, sync::SyncService>,
+    hardware: tauri::State<'_, hardware::HardwareService>,
+) -> sync::Snapshot {
+    let _ = hardware.preview(None);
     sync.stop()
+}
+
+#[tauri::command]
+fn set_light_preview(
+    window: tauri::WebviewWindow,
+    hardware: tauri::State<'_, hardware::HardwareService>,
+    preview: Option<hardware::preview::PreviewRequest>,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("Light positioning is only available in the main window.".into());
+    }
+    hardware.preview(preview)
 }
 
 #[tauri::command]
@@ -153,6 +169,7 @@ pub fn run() {
             hardware_snapshot,
             retry_hardware_discovery,
             identify_device,
+            set_light_preview,
             load_config,
             save_config,
             sync_snapshot,

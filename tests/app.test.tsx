@@ -41,7 +41,7 @@ describe('room editing UI', () => {
   it('starts empty and each addition immediately creates exactly one orb and one named bulb card', async () => {
     const { user } = await setup();
     expect(screen.getByRole('button', { name: 'Start Sync' })).toBeDisabled();
-    await user.click(screen.getByRole('button', { name: 'Your Rooms 02' }));
+    await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
     await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
     const card = screen.getByRole('button', { name: 'Select Light 1' });
     expect(card).toHaveAttribute('aria-pressed', 'true');
@@ -64,7 +64,7 @@ describe('room editing UI', () => {
   });
   it('keeps card and orb selection synchronized; name/icon/delete changes affect the correct ID', async () => {
     const { user, store } = await setup();
-    await user.click(screen.getByRole('button', { name: 'Your Rooms 02' }));
+    await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
     await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
     const first = store.getSnapshot().selectedLightId!;
     await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
@@ -96,7 +96,7 @@ describe('room editing UI', () => {
   });
   it('saves via the keyboard, marks icon edits dirty and restores the saved card on confirmed discard', async () => {
     const { user, persistence } = await setup();
-    await user.click(screen.getByRole('button', { name: 'Your Rooms 02' }));
+    await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
     await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
     await user.click(screen.getByRole('button', { name: 'Lamp' }));
     fireEvent.keyDown(window, { key: 's', metaKey: true });
@@ -119,9 +119,9 @@ describe('room editing UI', () => {
   });
   it('uses an accessible navigation dialog and displays failed saves with the draft intact', async () => {
     const { user, persistence } = await setup();
-    await user.click(screen.getByRole('button', { name: 'Your Rooms 02' }));
+    await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
     await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
-    await user.click(screen.getByRole('button', { name: 'Sync 01' }));
+    await user.click(screen.getByRole('button', { name: 'Sync' }));
     const dialog = screen.getByRole('dialog');
     expect(within(dialog).getByRole('button', { name: 'Stay' })).toHaveFocus();
     persistence.error = new Error('Disk is full');
@@ -149,9 +149,11 @@ describe('physical light UI', () => {
       boundLightId: null,
     };
     const identify = vi.fn(async () => {});
+    const preview = vi.fn(async () => {});
     const retryDiscovery = vi.fn(async () => {});
     const { user, store } = await setup({
       available: true,
+      preview,
       identify,
       retryDiscovery,
       dispose() {},
@@ -160,7 +162,7 @@ describe('physical light UI', () => {
         receive({ devices: [device], discoveryError: null });
       },
     });
-    await user.click(screen.getByRole('button', { name: 'Your Rooms 02' }));
+    await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
     await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
     await user.click(
       screen.getByRole('button', { name: 'Add physical light' }),
@@ -185,6 +187,13 @@ describe('physical light UI', () => {
     const row = screen.getByRole('group', { name: 'Physical lights' });
     expect(within(row).getAllByRole('button')).toHaveLength(1);
     expect(store.getSnapshot().draft!.lights[1].id).not.toBe(device.deviceId);
+    expect(preview).toHaveBeenLastCalledWith({
+      deviceId: device.deviceId,
+      position: store.getSnapshot().draft!.lights[1].position,
+      mode: 'location',
+    });
+    fireEvent.blur(window);
+    expect(preview).toHaveBeenLastCalledWith(null);
     await user.click(screen.getByRole('button', { name: /Save Room/ }));
     act(() =>
       receive({
@@ -215,6 +224,7 @@ describe('physical light UI', () => {
     };
     const { user, store } = await setup({
       available: true,
+      async preview() {},
       async identify() {},
       async retryDiscovery() {},
       dispose() {},
@@ -222,7 +232,7 @@ describe('physical light UI', () => {
         receive({ devices: [device], discoveryError: null });
       },
     });
-    await user.click(screen.getByRole('button', { name: 'Your Rooms 02' }));
+    await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
     await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
     const logicalId = store.getSnapshot().selectedLightId;
     await user.click(
