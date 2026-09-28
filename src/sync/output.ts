@@ -19,6 +19,7 @@ export interface SyncOutput {
   getSnapshot(): SyncSnapshot;
   getColor(id: string): RGB | undefined;
   start(source: SyncSource, reducedMotion?: boolean): Promise<void>;
+  setReducedMotion(reducedMotion: boolean): Promise<void>;
   stop(): Promise<void>;
   dispose(): void;
 }
@@ -47,6 +48,7 @@ export class NativeSyncOutput implements SyncOutput {
   private unlisten?: UnlistenFn;
   private connecting?: Promise<void>;
   private disposed = false;
+  private commands: Promise<void> = Promise.resolve();
   constructor(
     readonly available = isTauri(),
     private transport = nativeTransport,
@@ -92,20 +94,37 @@ export class NativeSyncOutput implements SyncOutput {
     });
     return this.connecting;
   }
-  async start(source: SyncSource, reducedMotion = false) {
-    if (!this.available)
-      throw new Error('Screen sync requires the desktop application.');
-    await this.connect();
-    this.receive(
-      await this.transport.invoke<SyncSnapshot>('start_sync', {
-        source,
-        reducedMotion,
-      }),
-    );
+  private enqueue(command: () => Promise<void>) {
+    const result = this.commands.then(command);
+    this.commands = result.catch(() => undefined);
+    return result;
   }
-  async stop() {
-    if (this.available)
-      this.receive(await this.transport.invoke<SyncSnapshot>('stop_sync'));
+  start(source: SyncSource, reducedMotion = false) {
+    return this.enqueue(async () => {
+      if (!this.available)
+        throw new Error('Screen sync requires the desktop application.');
+      await this.connect();
+      this.receive(
+        await this.transport.invoke<SyncSnapshot>('start_sync', {
+          source,
+          reducedMotion,
+        }),
+      );
+    });
+  }
+  setReducedMotion(reducedMotion: boolean) {
+    return this.enqueue(async () => {
+      if (this.available)
+        await this.transport.invoke<void>('set_reduced_motion', {
+          reducedMotion,
+        });
+    });
+  }
+  stop() {
+    return this.enqueue(async () => {
+      if (this.available)
+        this.receive(await this.transport.invoke<SyncSnapshot>('stop_sync'));
+    });
   }
   dispose() {
     this.disposed = true;

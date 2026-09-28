@@ -169,7 +169,8 @@ pub fn validate(config: &Configuration) -> Result<(), ConfigError> {
     Ok(())
 }
 
-// No native live editor state. The mutex serializes file transactions only.
+// No native live editor state. The mutex serializes this store's transactions;
+// saves also lock a stable sidecar shared by every process using the same path.
 pub struct ConfigStore {
     path: PathBuf,
     gate: Mutex<()>,
@@ -220,6 +221,24 @@ impl ConfigStore {
             .lock()
             .map_err(|_| ConfigError::new("io", "Configuration lock failed. Restart IOTensity."))?;
         validate(&config)?;
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| ConfigError::new("io", "Invalid configuration directory."))?;
+        fs::create_dir_all(parent).map_err(ConfigError::io)?;
+        let mut lock_path = self.path.as_os_str().to_os_string();
+        lock_path.push(".lock");
+        let transaction = fs::File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)
+            .map_err(ConfigError::io)?;
+        // Lock the sidecar, never the configuration inode that persist replaces.
+        // Keep the file on disk; removing it could split concurrent writers
+        // across different locks. Closing this handle releases the OS lock.
+        transaction.lock().map_err(ConfigError::io)?;
         // Reading first also prevents a broken/unsupported file being silently overwritten.
         let current = self.read()?;
         if current.revision != expected_revision || config.revision != expected_revision {
@@ -232,11 +251,6 @@ impl ConfigStore {
             ));
         }
         config.revision = expected_revision + 1;
-        let parent = self
-            .path
-            .parent()
-            .ok_or_else(|| ConfigError::new("io", "Invalid configuration directory."))?;
-        fs::create_dir_all(parent).map_err(ConfigError::io)?;
         let bytes = serde_json::to_vec_pretty(&config)
             .map_err(|error| ConfigError::new("invalid", error.to_string()))?;
         let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(ConfigError::io)?;

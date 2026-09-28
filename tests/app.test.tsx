@@ -38,6 +38,28 @@ async function setup(hardware?: HardwareClient) {
 afterEach(() => stores.splice(0).forEach((store) => store.dispose()));
 
 describe('room editing UI', () => {
+  it('keeps physical output failures visible when discovery succeeds and clears them on recovery', async () => {
+    let receive!: (snapshot: DevicesSnapshot) => void;
+    const outputError = 'Cannot open the output socket. Retrying.';
+    await setup({
+      available: true,
+      async preview() {},
+      async identify() {},
+      async retryDiscovery() {},
+      dispose() {},
+      async connect(listener) {
+        receive = listener;
+        receive({ devices: [], discoveryError: null, outputError });
+      },
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent(outputError);
+    act(() => receive({ devices: [], discoveryError: null, outputError }));
+    expect(screen.getByRole('alert')).toHaveTextContent(outputError);
+    act(() =>
+      receive({ devices: [], discoveryError: null, outputError: null }),
+    );
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
   it('starts empty and each addition immediately creates exactly one orb and one named bulb card', async () => {
     const { user } = await setup();
     expect(screen.getByRole('button', { name: 'Start Sync' })).toBeDisabled();
@@ -159,7 +181,7 @@ describe('physical light UI', () => {
       dispose() {},
       async connect(listener) {
         receive = listener;
-        receive({ devices: [device], discoveryError: null });
+        receive({ devices: [device], outputError: null, discoveryError: null });
       },
     });
     await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
@@ -198,6 +220,7 @@ describe('physical light UI', () => {
     act(() =>
       receive({
         devices: [{ ...device, online: false }],
+        outputError: null,
         discoveryError: null,
       }),
     );
@@ -229,7 +252,7 @@ describe('physical light UI', () => {
       async retryDiscovery() {},
       dispose() {},
       async connect(receive) {
-        receive({ devices: [device], discoveryError: null });
+        receive({ devices: [device], outputError: null, discoveryError: null });
       },
     });
     await user.click(screen.getByRole('button', { name: 'Your Rooms' }));

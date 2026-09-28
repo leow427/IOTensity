@@ -187,6 +187,11 @@ export function App() {
           )}
           {state.phase === 'ready' && (
             <>
+              {state.outputError && (
+                <div className="error-banner" role="alert">
+                  Physical lights unavailable. {state.outputError}
+                </div>
+              )}
               {state.preferenceError && (
                 <div className="error-banner preference-error" role="alert">
                   <span>Preferences not saved. {state.preferenceError}</span>

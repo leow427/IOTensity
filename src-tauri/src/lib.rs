@@ -86,6 +86,10 @@ fn start_sync(
     sync.start(source)
 }
 #[tauri::command]
+fn set_reduced_motion(sync: tauri::State<'_, sync::SyncService>, reduced_motion: bool) {
+    sync.set_reduced_motion(reduced_motion);
+}
+#[tauri::command]
 fn stop_sync(
     sync: tauri::State<'_, sync::SyncService>,
     hardware: tauri::State<'_, hardware::HardwareService>,
@@ -174,6 +178,7 @@ pub fn run() {
             save_config,
             sync_snapshot,
             start_sync,
+            set_reduced_motion,
             stop_sync,
             overlay::set_overlay,
             overlay::overlay_is_open

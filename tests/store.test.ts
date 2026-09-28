@@ -174,4 +174,123 @@ describe('draft / saved / runtime ownership', () => {
     expect(await store.saveRoom()).toBe(false);
     expect(persistence.calls).toHaveLength(0);
   });
+  it.each(['save', 'discard', 'stay'] as const)(
+    'guards room edits made during a close flush and preserves the %s choice',
+    async (choice) => {
+      const { store, persistence } = await setup();
+      const gate = deferred();
+      persistence.gate = gate.promise;
+      store.setPreferences({ brightness: 25 });
+      const closing = store.requestTransition('close');
+      await Promise.resolve();
+      store.addLight();
+      gate.resolve();
+      await closing;
+      expect(store.getSnapshot().readyToClose).toBe(false);
+      expect(store.getSnapshot().pending).toBe('close');
+      expect(store.dirty).toBe(true);
+      await store.resolveTransition(choice);
+      expect(store.getSnapshot().readyToClose).toBe(choice !== 'stay');
+      expect(persistence.config.rooms[0].lights).toHaveLength(
+        choice === 'save' ? 1 : 0,
+      );
+      expect(store.dirty).toBe(choice === 'stay');
+    },
+  );
+  it('flushes preferences edited during close and blocks edits once close is authorized', async () => {
+    const { store, persistence } = await setup();
+    const gate = deferred();
+    persistence.gate = gate.promise;
+    store.setPreferences({ brightness: 25 });
+    const closing = store.requestTransition('close');
+    await Promise.resolve();
+    store.setPreferences({ brightness: 80 });
+    gate.resolve();
+    await closing;
+    expect(
+      persistence.calls.map((call) => call.preferences.brightness),
+    ).toEqual([25, 80]);
+    expect(persistence.config.preferences.brightness).toBe(80);
+    expect(store.getSnapshot().readyToClose).toBe(true);
+    store.addLight();
+    store.setPreferences({ brightness: 10 });
+    expect(store.dirty).toBe(false);
+    expect(store.getSnapshot().preferences.brightness).toBe(80);
+  });
+  it.each([false, true])(
+    'Stay cancels an earlier close flush even when the intervening edit is reverted: %s',
+    async (revert) => {
+      const { store, persistence } = await setup();
+      const gate = deferred();
+      persistence.gate = gate.promise;
+      store.setPreferences({ brightness: 25 });
+      const closing = store.requestTransition('close');
+      await Promise.resolve();
+      store.addLight();
+      await store.requestTransition('close');
+      await store.resolveTransition('stay');
+      if (revert) store.deleteSelected();
+      gate.resolve();
+      await closing;
+      expect(store.getSnapshot().readyToClose).toBe(false);
+      expect(store.getSnapshot().pending).toBeNull();
+      expect(store.dirty).toBe(!revert);
+    },
+  );
+  it('honors a fresh close requested after Stay while the canceled flush is still pending', async () => {
+    const { store, persistence } = await setup();
+    const gate = deferred();
+    persistence.gate = gate.promise;
+    store.setPreferences({ brightness: 25 });
+    const canceled = store.requestTransition('close');
+    await Promise.resolve();
+    store.addLight();
+    await store.requestTransition('close');
+    await store.resolveTransition('stay');
+    await store.requestTransition('close');
+    const confirmed = store.resolveTransition('discard');
+    gate.resolve();
+    await Promise.all([canceled, confirmed]);
+    expect(store.getSnapshot().readyToClose).toBe(true);
+    expect(store.getSnapshot().pending).toBeNull();
+    expect(store.dirty).toBe(false);
+  });
+  it('keeps close blocked when its preference flush fails', async () => {
+    const { store, persistence } = await setup();
+    store.setPreferences({ brightness: 25 });
+    persistence.error = new Error('Disk full');
+    await store.requestTransition('close');
+    expect(store.getSnapshot().readyToClose).toBe(false);
+    expect(store.getSnapshot().preferenceError).toContain('Disk full');
+    persistence.error = null;
+    await store.requestTransition('close');
+    expect(store.getSnapshot().readyToClose).toBe(true);
+    expect(store.getSnapshot().preferenceError).toBeNull();
+  });
+  it('clears an older failed preference write when the newer queued write succeeds', async () => {
+    const { store, persistence } = await setup();
+    const gate = deferred();
+    vi.spyOn(persistence, 'save').mockImplementationOnce(async () => {
+      await gate.promise;
+      throw new Error('Temporary failure');
+    });
+    store.setPreferences({ brightness: 25 });
+    const old = store.savePreferences();
+    store.setPreferences({ brightness: 80 });
+    const newer = store.savePreferences();
+    gate.resolve();
+    expect(await old).toBe(false);
+    expect(await newer).toBe(true);
+    expect(persistence.config.preferences.brightness).toBe(80);
+    expect(store.getSnapshot().preferenceError).toBeNull();
+  });
+  it('forwards live Reduce Motion changes to the running output', async () => {
+    const { store } = await setup(fixture as Configuration);
+    const update = vi.spyOn(store.output, 'setReducedMotion');
+    await store.start();
+    store.setReducedMotion(true);
+    store.setReducedMotion(false);
+    expect(update.mock.calls).toEqual([[true], [false]]);
+    expect(store.getSnapshot().running).toBe(true);
+  });
 });

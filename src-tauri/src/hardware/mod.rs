@@ -1,6 +1,7 @@
 pub mod control;
 mod discovery;
 pub mod engine;
+mod output;
 pub mod preview;
 pub mod protocol;
 
@@ -39,6 +40,7 @@ pub struct DeviceView {
 pub struct DevicesSnapshot {
     pub devices: Vec<DeviceView>,
     pub discovery_error: Option<String>,
+    pub output_error: Option<String>,
 }
 #[derive(Default)]
 struct Device {
@@ -56,6 +58,8 @@ struct State {
     reduced_motion: bool,
     devices: BTreeMap<String, Device>,
     discovery_error: Option<String>,
+    output_error: Option<String>,
+    output_available: bool,
     last_frame: Option<Instant>,
     preview: Option<preview::Preview>,
 }
@@ -136,9 +140,12 @@ impl State {
         self.prune_targets();
         result
     }
-    fn reset_discovery(&mut self, network_changed: bool) {
+    fn reset_discovery(&mut self) {
         for device in self.devices.values_mut() {
-            if network_changed || !device.connection.online {
+            // Interface notifications also include unrelated VPN/IPv6 changes.
+            // Existing identity-verified control probes decide whether a stream
+            // is still healthy; rebuilding discovery must not tear it down.
+            if !device.connection.online {
                 device.advertisements.clear();
                 device.connection = ConnectionState::default();
             }
@@ -161,14 +168,19 @@ impl State {
         endpoints.dedup();
         Some(Wish {
             epoch: self.epoch,
-            light_id: self.color(id).map(|(light_id, _)| light_id),
-            running: self.color(id).is_some(),
+            light_id: self
+                .output_available
+                .then(|| self.color(id))
+                .flatten()
+                .map(|(light_id, _)| light_id),
+            running: self.output_available && self.color(id).is_some(),
             endpoints,
         })
     }
     fn snapshot(&self) -> DevicesSnapshot {
         DevicesSnapshot {
             discovery_error: self.discovery_error.clone(),
+            output_error: self.output_error.clone(),
             devices: self
                 .devices
                 .iter()
@@ -177,8 +189,14 @@ impl State {
                     short_id: format!("IOT-{}", id[12..].to_uppercase()),
                     model: "esp32-rgb".into(),
                     online: device.connection.online,
-                    streaming: self.color(id).is_some() && device.connection.target.is_some(),
-                    message: if self.preview.as_ref().is_some_and(|p| &p.device_id == id)
+                    streaming: self.output_available
+                        && self.color(id).is_some()
+                        && device.connection.target.is_some(),
+                    message: if self.color(id).is_some() && !self.output_available {
+                        self.output_error
+                            .clone()
+                            .unwrap_or_else(|| "Connecting UDP output…".into())
+                    } else if self.preview.as_ref().is_some_and(|p| &p.device_id == id)
                         && device.connection.target.is_some()
                     {
                         "Position preview".into()
@@ -325,12 +343,20 @@ impl HardwareService {
     }
     /// Accept only final per-light RGB8 from the native source. No transport smoothing.
     pub fn publish(&self, colors: &[crate::sync::processing::LightColor], running: bool) {
+        self.publish_at(colors, running, Instant::now());
+    }
+    pub fn publish_at(
+        &self,
+        colors: &[crate::sync::processing::LightColor],
+        running: bool,
+        observed_at: Instant,
+    ) {
         let mut state = self.0.state.lock().unwrap();
         if state.output.running != running {
             state.epoch += 1;
         }
         state.output.running = running;
-        state.last_frame = Some(Instant::now());
+        state.last_frame = Some(observed_at);
         state.output.colors = colors
             .iter()
             .map(|c| engine::Color {
@@ -341,18 +367,19 @@ impl HardwareService {
         state.prune_targets();
     }
     fn output_loop(&self) {
-        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).and_then(|socket| {
-            socket.set_nonblocking(true)?;
-            Ok(socket)
-        });
-        if let Err(error) = &socket {
-            self.0.state.lock().unwrap().discovery_error =
-                Some(format!("UDP output unavailable: {error}"));
-        }
+        let clock = Instant::now();
+        let mut output = output::SocketRecovery::default();
         let mut sequences: HashMap<String, (protocol::Session, u32)> = HashMap::new();
         while !self.is_shutdown() {
+            output.poll(clock.elapsed().as_millis() as u64, || {
+                let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+                socket.set_nonblocking(true)?;
+                Ok(socket)
+            });
             let targets = {
                 let mut state = self.0.state.lock().unwrap();
+                state.output_available = output.socket.is_some();
+                state.output_error = output.error.clone();
                 state.expire(Instant::now());
                 // Keep the sequence through a transient control failure that may
                 // recover the same session via an idempotent start retry.
@@ -367,7 +394,7 @@ impl HardwareService {
                     })
                     .collect::<Vec<_>>()
             };
-            if let Ok(socket) = &socket {
+            if let Some(socket) = &output.socket {
                 for (id, target, rgb) in targets {
                     let entry = sequences.entry(id).or_insert((target.session, 0));
                     if entry.0 != target.session {
@@ -477,11 +504,7 @@ impl HardwareService {
                     network_changed || requested,
                     online,
                 ) {
-                    self.0
-                        .state
-                        .lock()
-                        .unwrap()
-                        .reset_discovery(network_changed);
+                    self.0.state.lock().unwrap().reset_discovery();
                     // Keep identities and room bindings, but recreate the socket
                     // and multicast membership instead of only issuing another query.
                     break;
@@ -598,23 +621,134 @@ mod tests {
         let logical_id = light.id.clone();
         let mut state = State {
             config,
+            output_available: true,
             ..State::default()
         };
+        state.output.running = true;
+        state.output.colors.push(engine::Color {
+            id: logical_id.clone(),
+            rgb: [1, 2, 3],
+        });
         let mut device = Device::default();
         device.connection.online = true;
+        device.connection.target = Some(control::Target {
+            light_id: logical_id.clone(),
+            address: "192.168.1.39:49600".parse().unwrap(),
+            session: [7; 16],
+        });
         device.advertisements.insert(
             "light._iotensity._tcp.local.".into(),
             vec!["192.168.1.39:80".parse().unwrap()],
         );
         state.devices.insert(id.clone(), device);
-        state.reset_discovery(false);
-        assert!(state.devices[&id].connection.online);
-        assert!(!state.wish(&id).unwrap().endpoints.is_empty());
-        state.reset_discovery(true);
-        assert!(!state.devices[&id].connection.online);
-        assert!(state.wish(&id).unwrap().endpoints.is_empty());
+        let before = state.devices[&id].connection.clone();
+        let wish = state.wish(&id).unwrap();
+        assert!(wish.running);
+        state.reset_discovery();
+        assert_eq!(state.devices[&id].connection, before);
+        assert_eq!(state.wish(&id).unwrap(), wish);
+        // Repeated network notifications use the same reset as manual recovery.
+        state.reset_discovery();
+        assert_eq!(state.devices[&id].connection, before);
+        assert_eq!(state.wish(&id).unwrap(), wish);
         assert_eq!(state.binding(&id), Some(logical_id));
         assert_eq!(state.devices.len(), 1);
+        state.devices.get_mut(&id).unwrap().connection.online = false;
+        state.reset_discovery();
+        assert!(state.wish(&id).unwrap().endpoints.is_empty());
+        assert!(state.devices[&id].connection.target.is_none());
+    }
+
+    #[test]
+    fn discovery_recovery_cannot_clear_udp_fault_or_claim_streaming() {
+        let id = "esp32-020000a1b2c3";
+        let mut state = State {
+            output_available: true,
+            ..State::default()
+        };
+        state.devices.insert(id.into(), online_device());
+        state
+            .set_preview(Some(preview_request(id, 0.0)), Instant::now())
+            .unwrap();
+        state.devices.get_mut(id).unwrap().connection.target = Some(control::Target {
+            light_id: format!("preview-{id}"),
+            address: "192.168.1.39:49600".parse().unwrap(),
+            session: [7; 16],
+        });
+        state.output_available = false;
+        assert!(!state.wish(id).unwrap().running);
+        assert!(state.wish(id).unwrap().light_id.is_none());
+        state.output_error = Some("UDP output unavailable: address unavailable".into());
+        state.discovery_error = Some("Discovery unavailable".into());
+        state.reset_discovery();
+        state.discovery_error = None; // A successful daemon restart.
+        let snapshot = state.snapshot();
+        assert!(snapshot.discovery_error.is_none());
+        assert!(snapshot.output_error.is_some());
+        assert!(!snapshot.devices[0].streaming);
+        assert!(snapshot.devices[0]
+            .message
+            .contains("UDP output unavailable"));
+        state.output_error = None;
+        state.output_available = true;
+        assert!(state.wish(id).unwrap().running);
+        assert!(state.snapshot().devices[0].streaming);
+        assert_eq!(state.snapshot().devices[0].message, "Position preview");
+    }
+
+    #[test]
+    fn cached_publication_keeps_original_source_age_for_watchdog() {
+        let service = HardwareService(Arc::new(Inner {
+            state: Mutex::new(State::default()),
+            shutdown: AtomicBool::new(false),
+            retry_discovery: AtomicBool::new(false),
+            client_id: "test".into(),
+        }));
+        let config: Configuration =
+            serde_json::from_str(include_str!("../../../tests/fixtures/configuration.json"))
+                .unwrap();
+        let light = config.rooms[0].lights.last().unwrap();
+        let LightOutput::Esp32 { device_id } = &light.output else {
+            panic!("physical fixture")
+        };
+        let id = device_id.clone();
+        let logical_id = light.id.clone();
+        service.apply_saved(config);
+        let colors = [crate::sync::processing::LightColor {
+            id: logical_id.clone(),
+            rgb: [1, 2, 3],
+        }];
+        let observed = Instant::now();
+        service.publish_at(&colors, true, observed);
+        service.publish_at(&colors, true, observed); // Cached repaint cannot renew source age.
+        let mut state = service.0.state.lock().unwrap();
+        let target = control::Target {
+            light_id: logical_id,
+            address: "192.168.1.39:49600".parse().unwrap(),
+            session: [7; 16],
+        };
+        state.devices.get_mut(&id).unwrap().connection.target = Some(target.clone());
+        assert_eq!(state.last_frame, Some(observed));
+        state.expire(observed + Duration::from_millis(251));
+        assert!(!state.output.running);
+        assert!(state.devices[&id].connection.target.is_none());
+        drop(state);
+        service.publish_at(&colors, true, observed);
+        service
+            .0
+            .state
+            .lock()
+            .unwrap()
+            .devices
+            .get_mut(&id)
+            .unwrap()
+            .connection
+            .target = Some(target);
+        service.publish_at(&colors, false, observed);
+        assert!(service.0.state.lock().unwrap().devices[&id]
+            .connection
+            .target
+            .is_none());
     }
 
     #[test]
@@ -630,6 +764,7 @@ mod tests {
         let logical_id = light.id.clone();
         let mut state = State {
             config,
+            output_available: true,
             ..State::default()
         };
         state.devices.insert(id.clone(), Device::default());
@@ -668,7 +803,10 @@ mod tests {
     fn unsaved_preview_renews_without_reconnecting_and_expires_without_sync() {
         let id = "esp32-020000a1b2c3";
         let other = "esp32-020000112233";
-        let mut state = State::default();
+        let mut state = State {
+            output_available: true,
+            ..State::default()
+        };
         state.devices.insert(id.into(), online_device());
         state.devices.insert(other.into(), online_device());
         let saved = state.config.clone();
@@ -699,7 +837,10 @@ mod tests {
     fn selection_switch_cancel_and_invalid_requests_release_previous_light() {
         let id = "esp32-020000a1b2c3";
         let other = "esp32-020000112233";
-        let mut state = State::default();
+        let mut state = State {
+            output_available: true,
+            ..State::default()
+        };
         state.devices.insert(id.into(), online_device());
         state.devices.insert(other.into(), online_device());
         let now = Instant::now();

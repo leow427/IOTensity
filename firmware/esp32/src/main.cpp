@@ -19,8 +19,6 @@ Preferences preferences;
 SemaphoreHandle_t stream_lock;
 iotensity::Stream stream;
 String device_id, hostname, configured_ssid, configured_password;
-bool identifying = false;
-uint32_t identify_started = 0;
 bool connected = false;
 
 class Guard {
@@ -102,7 +100,7 @@ void stop_stream() {
 }
 void identify() {
   StaticJsonDocument<512> json; if (!body(json)) return;
-  { Guard guard; identifying = true; identify_started = millis(); }
+  { Guard guard; stream.identify(millis()); }
   status();
 }
 
@@ -129,14 +127,7 @@ void output_task(void*) {
     Rgb rgb;
     {
       Guard guard;
-      const uint32_t now = millis();
-      if (!wifi) stream.stop();
-      stream.expire(now); rgb = stream.rgb;
-      if (identifying) {
-        const uint32_t elapsed = now - identify_started;
-        if (elapsed >= 900) identifying = false;
-        else rgb = (elapsed / 150) % 2 == 0 ? Rgb{160, 160, 160} : Rgb{0, 0, 0};
-      }
+      rgb = stream.output(millis(), wifi);
     }
     if (rgb != previous) {
       for (uint8_t i = 0; i < 3; ++i) ledcWrite(i, IOT_COMMON_ANODE ? 255 - rgb[i] : rgb[i]);

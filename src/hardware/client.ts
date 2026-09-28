@@ -20,6 +20,7 @@ export type Device = {
 export type DevicesSnapshot = {
   devices: Device[];
   discoveryError: string | null;
+  outputError: string | null;
 };
 export interface NativeTransport {
   invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;

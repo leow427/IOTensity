@@ -62,5 +62,27 @@ int main(int argc, char** argv) {
   stream.expire(0x000003d8); assert(!stream.active);
   assert(stream.start(7, client, request, next, 0)); stream.stop();
   assert(!stream.receive(bytes.data(), bytes.size(), 7, 1));
+  // Exercise the exact color selector used by the PWM task, not just stream.rgb.
+  stream.identify(10); // Discovery Identify works while normally stopped.
+  assert(stream.output(10, true) == (Rgb{160, 160, 160}));
+  assert(stream.output(160, true) == (Rgb{0, 0, 0}));
+  assert(stream.output(310, true) == (Rgb{160, 160, 160}));
+  assert(stream.output(910, true) == (Rgb{0, 0, 0}));
+  assert(stream.start(7, client, request, session, 1000));
+  bytes = packet(session, 0);
+  assert(stream.receive(bytes.data(), bytes.size(), 7, 1001));
+  stream.identify(1002);
+  assert(stream.output(1002, true) == (Rgb{160, 160, 160}));
+  stream.stop(); // Accepted HTTP Stop and main-loop Wi-Fi/IP changes use this.
+  assert(stream.output(1003, true) == (Rgb{0, 0, 0}));
+  assert(stream.output(1302, true) == (Rgb{0, 0, 0})); // No later blink resumes.
+  stream.identify(2000);
+  assert(stream.output(2000, false) == (Rgb{0, 0, 0})); // PWM task sees Wi-Fi loss.
+  assert(stream.output(2300, true) == (Rgb{0, 0, 0})); // Reconnect stays off.
+  assert(stream.start(7, client, request, session, 3000));
+  stream.identify(3900);
+  assert(stream.output(3999, true) == (Rgb{160, 160, 160}));
+  stream.expire(4000); // HTTP status expiry must also cancel Identify.
+  assert(stream.output(4200, true) == (Rgb{0, 0, 0}));
   std::cout << "Firmware protocol: golden packet, owner/session, ordering/wrap, keepalive, timeout and stop passed\n";
 }

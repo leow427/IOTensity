@@ -23,8 +23,13 @@ inline bool decode(const uint8_t* bytes, size_t size, Frame& frame) {
   return true;
 }
 
-// Network-independent receiver. Callers serialize access; all time is injected.
+// Network-independent receiver and PWM color selection. Callers serialize
+// access; all time is injected, including Identify and safe-off transitions.
 class Stream {
+ private:
+  bool identifying = false;
+  uint32_t identify_started = 0;
+
  public:
   bool active = false;
   bool has_sequence = false;
@@ -40,7 +45,18 @@ class Stream {
   void expire(uint32_t now) {
     if (active && uint32_t(now - last_valid) >= kTimeoutMs) stop();
   }
-  void stop() { active = false; has_sequence = false; rgb = {0, 0, 0}; }
+  void stop() { active = false; has_sequence = false; rgb = {0, 0, 0}; identifying = false; }
+  void identify(uint32_t now) { identifying = true; identify_started = now; }
+  Rgb output(uint32_t now, bool wifi) {
+    if (!wifi) stop();
+    expire(now);
+    if (identifying) {
+      const uint32_t elapsed = now - identify_started;
+      if (elapsed >= 900) identifying = false;
+      else return (elapsed / 150) % 2 == 0 ? Rgb{160, 160, 160} : Rgb{0, 0, 0};
+    }
+    return rgb;
+  }
   bool start(uint32_t ip, Token client_id, Token request_id, Token fresh_session, uint32_t now) {
     expire(now);
     if (active) {

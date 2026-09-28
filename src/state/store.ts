@@ -47,6 +47,7 @@ export type AppState = {
   running: boolean;
   devices: Device[];
   discoveryError: string | null;
+  outputError: string | null;
   hardwareError: string | null;
   identifying: string | null;
   syncSource: SyncSource;
@@ -75,6 +76,7 @@ export class AppStore {
     running: false,
     devices: [],
     discoveryError: null,
+    outputError: null,
     hardwareError: null,
     identifying: null,
     syncSource: 'simulation',
@@ -91,6 +93,8 @@ export class AppStore {
   private pendingPreferenceWrites = 0;
   private disposed = false;
   private previewGeneration = 0;
+  private closing: number | null = null;
+  private closeGeneration = 0;
 
   constructor(
     readonly persistence: Persistence,
@@ -129,7 +133,11 @@ export class AppStore {
     );
   }
   get canEdit() {
-    return this.state.phase === 'ready' && this.state.saveStatus !== 'saving';
+    return (
+      this.state.phase === 'ready' &&
+      this.state.saveStatus !== 'saving' &&
+      !this.state.readyToClose
+    );
   }
 
   async load() {
@@ -146,8 +154,8 @@ export class AppStore {
         selectedLightId: null,
       });
       void this.hardware
-        .connect(({ devices, discoveryError }) =>
-          this.set({ devices, discoveryError }),
+        .connect(({ devices, discoveryError, outputError }) =>
+          this.set({ devices, discoveryError, outputError }),
         )
         .catch((error) => this.set({ discoveryError: errorMessage(error) }));
       try {
@@ -175,13 +183,13 @@ export class AppStore {
   }
   private sendLightPreview(request: LightPreview | null) {
     const generation = ++this.previewGeneration;
-    void this.hardware.preview(request).catch((error) => {
+    return this.hardware.preview(request).catch((error) => {
       if (generation === this.previewGeneration)
         this.set({ hardwareError: errorMessage(error) });
     });
   }
   clearLightPreview() {
-    this.sendLightPreview(null);
+    return this.sendLightPreview(null);
   }
   private previewSelected() {
     const light = this.state.draft?.lights.find(
@@ -193,6 +201,7 @@ export class AppStore {
       light &&
         deviceId &&
         this.canEdit &&
+        !this.state.syncBusy &&
         this.state.page === 'rooms' &&
         !this.state.pending &&
         this.state.devices.some((d) => d.deviceId === deviceId && d.online)
@@ -393,7 +402,7 @@ export class AppStore {
     }
   }
   setPreferences(patch: Partial<Preferences>) {
-    if (this.state.phase !== 'ready') return;
+    if (this.state.phase !== 'ready' || this.state.readyToClose) return;
     const preferences = { ...this.state.preferences, ...patch };
     if (patch.brightness !== undefined)
       preferences.brightness = Math.max(
@@ -424,6 +433,7 @@ export class AppStore {
       await this.commit((config) => {
         config.preferences = snapshot;
       });
+      this.set({ preferenceError: null });
       return true;
     } catch (error) {
       this.set({ preferenceError: errorMessage(error) });
@@ -434,7 +444,11 @@ export class AppStore {
     }
   }
   setReducedMotion(reducedMotion: boolean) {
+    if (this.state.reducedMotion === reducedMotion) return;
     this.set({ reducedMotion });
+    void this.output.setReducedMotion(reducedMotion).catch((error) => {
+      this.set({ syncMessage: errorMessage(error) });
+    });
   }
   setSyncSource(syncSource: SyncSource) {
     if (
@@ -447,9 +461,9 @@ export class AppStore {
   async start() {
     if (this.state.syncBusy || !this.state.saved?.rooms[0].lights.length)
       return;
-    this.clearLightPreview();
     this.set({ syncBusy: true });
     try {
+      await this.clearLightPreview();
       await this.output.start(this.state.syncSource, this.state.reducedMotion);
     } catch (error) {
       this.set({
@@ -462,9 +476,9 @@ export class AppStore {
   }
   async stop() {
     if (this.state.syncBusy) return;
-    this.clearLightPreview();
     this.set({ syncBusy: true });
     try {
+      await this.clearLightPreview();
       await this.output.stop();
     } catch (error) {
       this.set({
@@ -489,6 +503,7 @@ export class AppStore {
     const destination = this.state.pending;
     if (!destination || this.state.saveStatus === 'saving') return;
     if (choice === 'stay') {
+      if (destination === 'close') this.closeGeneration++;
       this.set({ pending: null });
       return;
     }
@@ -502,8 +517,41 @@ export class AppStore {
   }
   private async finishTransition(destination: Destination) {
     if (destination === 'close') {
-      if (this.state.phase === 'error' || (await this.savePreferences()))
-        this.set({ readyToClose: true });
+      if (this.closing === this.closeGeneration || this.state.readyToClose)
+        return;
+      const generation = this.closeGeneration;
+      this.closing = generation;
+      try {
+        // Edits remain available during a slow preference flush. Recheck both
+        // the room guard and the latest preferences before authorizing close.
+        while (!this.disposed) {
+          if (this.dirty || this.state.saveStatus === 'saving') {
+            this.set({ pending: 'close' });
+            return;
+          }
+          if (this.state.phase === 'error') {
+            this.set({ readyToClose: true });
+            return;
+          }
+          if (
+            !(await this.savePreferences()) ||
+            generation !== this.closeGeneration
+          )
+            return;
+          if (this.dirty || this.getSnapshot().saveStatus === 'saving')
+            continue;
+          if (
+            this.pendingPreferenceWrites ||
+            JSON.stringify(this.state.preferences) !==
+              JSON.stringify(this.state.saved?.preferences)
+          )
+            continue;
+          this.set({ readyToClose: true });
+          return;
+        }
+      } finally {
+        if (this.closing === generation) this.closing = null;
+      }
     } else if (destination !== 'discard') this.set({ page: destination });
   }
   closeFailed(error: unknown) {

@@ -1,5 +1,8 @@
 use iotensity_lib::config::{validate, ConfigStore, Configuration};
-use std::{fs, sync::Arc};
+use std::{
+    fs,
+    sync::{Arc, Barrier},
+};
 
 fn fixture() -> Configuration {
     serde_json::from_str(include_str!("../../tests/fixtures/configuration.json")).unwrap()
@@ -118,6 +121,39 @@ fn concurrent_stale_writers_cannot_overwrite_a_commit() {
     let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
     assert_eq!(outcomes.iter().filter(|r| r.is_ok()).count(), 1);
     assert_eq!(store.load().unwrap().revision, 1);
+}
+
+#[test]
+fn independent_stores_cannot_acknowledge_conflicting_replacements() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("configuration.json");
+    let initial = ConfigStore::new(path.clone()).save(fixture(), 0).unwrap();
+    let barrier = Arc::new(Barrier::new(16));
+    let handles: Vec<_> = (0..16)
+        .map(|brightness| {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            let mut config = initial.clone();
+            config.preferences.brightness = brightness;
+            std::thread::spawn(move || {
+                let store = ConfigStore::new(path);
+                barrier.wait();
+                store.save(config, 1)
+            })
+        })
+        .collect();
+    let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let acknowledged: Vec<_> = outcomes.iter().filter_map(|r| r.as_ref().ok()).collect();
+    assert_eq!(acknowledged.len(), 1);
+    assert!(outcomes
+        .iter()
+        .filter_map(|r| r.as_ref().err())
+        .all(|error| error.code == "conflict"));
+    let store = ConfigStore::new(path);
+    assert_eq!(&store.load().unwrap(), acknowledged[0]);
+    // A conflict must release the lock, allowing a fresh acknowledged revision.
+    let current = store.load().unwrap();
+    assert_eq!(store.save(current, 2).unwrap().revision, 3);
 }
 
 #[test]

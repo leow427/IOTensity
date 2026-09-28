@@ -33,6 +33,7 @@ export class FakeHardware implements HardwareClient {
   }
   update(online: boolean) {
     this.received?.({
+      outputError: null,
       discoveryError: null,
       devices: [
         {
@@ -161,6 +162,69 @@ describe('physical identity and configuration', () => {
   });
 });
 describe('native hardware boundary', () => {
+  it.each(['start', 'stop'] as const)(
+    'drains delayed placement IPC before %s and suppresses previews during that operation',
+    async (action) => {
+      const gate = deferred();
+      const operationGate = deferred();
+      const calls: unknown[] = [];
+      const device = {
+        deviceId: id,
+        shortId: 'IOT-A1B2C3',
+        model: 'esp32-rgb',
+        online: true,
+        streaming: false,
+        message: 'Online',
+        boundLightId: 'light-lamp',
+      };
+      const hardware = new NativeHardwareClient(true, {
+        listen: async () => () => {},
+        invoke: async <T>(command: string, args?: Record<string, unknown>) => {
+          if (command === 'hardware_snapshot')
+            return {
+              devices: [device],
+              discoveryError: null,
+              outputError: null,
+            } as T;
+          calls.push(args?.preview);
+          if (args?.preview) await gate.promise;
+          return undefined as T;
+        },
+      });
+      const output = new FakeOutput();
+      output[action] = async () => {
+        calls.push(action);
+        await operationGate.promise;
+      };
+      const config = clone(fixture) as Configuration;
+      config.rooms[0].lights[3].output = { kind: 'esp32', deviceId: id };
+      const store = new AppStore(
+        new MemoryPersistence(config),
+        output,
+        hardware,
+      );
+      stores.push(store);
+      await store.load();
+      await store.requestTransition('rooms');
+      await hardware.preview(null);
+      calls.length = 0;
+      store.selectLight('light-lamp');
+      await Promise.resolve();
+      expect(calls).toHaveLength(1);
+      const operation = store[action]();
+      store.moveLight('light-lamp', { x: 1 });
+      await Promise.resolve();
+      expect(calls).toHaveLength(1);
+      expect(store.getSnapshot().syncBusy).toBe(true);
+      gate.resolve();
+      await hardware.preview(null);
+      await Promise.resolve();
+      expect(calls.slice(1)).toEqual([null, action]);
+      operationGate.resolve();
+      await operation;
+      expect(store.getSnapshot().syncBusy).toBe(false);
+    },
+  );
   it('coalesces rapid placement edits and sends cancellation after an in-flight command', async () => {
     const gate = deferred();
     const calls: unknown[] = [];
@@ -210,17 +274,19 @@ describe('native hardware boundary', () => {
       invoke: async <T>(command: string, args?: Record<string, unknown>) => {
         calls.push([command, args]);
         if (command === 'hardware_snapshot') await gate.promise;
-        return { devices: [], discoveryError: null } as T;
+        return { devices: [], outputError: null, discoveryError: null } as T;
       },
     };
     const client = new NativeHardwareClient(true, transport);
     const events: DevicesSnapshot[] = [];
     const connecting = client.connect((snapshot) => events.push(snapshot));
     await Promise.resolve();
-    receive({ devices: [], discoveryError: 'New event' });
+    receive({ devices: [], outputError: null, discoveryError: 'New event' });
     gate.resolve();
     await connecting;
-    expect(events).toEqual([{ devices: [], discoveryError: 'New event' }]);
+    expect(events).toEqual([
+      { devices: [], outputError: null, discoveryError: 'New event' },
+    ]);
     await client.identify(id);
     await client.retryDiscovery();
     expect(calls).toContainEqual(['identify_device', { deviceId: id }]);

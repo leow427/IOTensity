@@ -5,6 +5,8 @@ pub mod processing;
 use crate::config::Configuration;
 use processing::{generated_image, LightColor, Processor, OUTPUT_INTERVAL};
 use serde::{Deserialize, Serialize};
+#[cfg(any(target_os = "macos", test))]
+use std::time::Duration;
 use std::{
     sync::{Arc, Mutex},
     thread,
@@ -60,6 +62,113 @@ struct Runtime {
     simulation: crate::hardware::engine::Simulation,
 }
 
+impl Runtime {
+    fn update_local_source(&mut self) {
+        if self.snapshot.source == Source::Simulation {
+            self.snapshot.status = Status::Running;
+            self.snapshot.message = "Animated colors".into();
+        } else if self.snapshot.source == Source::Test && self.snapshot.status == Status::Starting {
+            self.processor.image = Some(generated_image());
+            self.snapshot.status = Status::Running;
+            self.snapshot.message = "Test image".into();
+        }
+    }
+
+    fn render(&mut self, dt: f32) {
+        if self.snapshot.status != Status::Running {
+            return;
+        }
+        if let Some(config) = &self.config {
+            self.snapshot.colors = if self.snapshot.source == Source::Simulation {
+                self.simulation
+                    .tick(dt as f64, config, self.reduced_motion)
+                    .colors
+                    .into_iter()
+                    .map(|c| LightColor {
+                        id: c.id,
+                        rgb: c.rgb,
+                    })
+                    .collect()
+            } else {
+                self.processor
+                    .frame(&config.rooms[0].lights, config.preferences.brightness)
+            };
+        }
+    }
+}
+
+// ScreenCaptureKit is event-driven: Idle declares unchanged content, not a
+// periodic heartbeat. These statuses mirror SCFrameStatus and remain portable
+// for source injection; callback age alone cannot identify a silent OS hang
+// after Idle. Native publisher stalls are independently bounded by hardware.
+#[cfg(any(target_os = "macos", test))]
+struct DisplayUpdate {
+    state: i32,
+    message: String,
+    frame_status: i32,
+    activity_age: Option<Duration>,
+    frame: Option<Result<processing::AnalysisImage, String>>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Runtime {
+    fn update_display(&mut self, update: DisplayUpdate, now: Instant) -> Instant {
+        let idle = update.frame_status == 1;
+        let observed_at = if idle {
+            // A retained explicit Idle state authorizes repetition until a later
+            // status/delegate event. It does not promise another callback soon.
+            now
+        } else {
+            update
+                .activity_age
+                .and_then(|age| now.checked_sub(age))
+                .unwrap_or(now)
+        };
+        let failure = if update.state == 4 {
+            Some(update.message)
+        } else if matches!(update.state, 2 | 3) {
+            Some("Display capture stopped. Restart capture to resume.".into())
+        } else if matches!(update.frame_status, 2 | 3 | 5) {
+            Some(
+                match update.frame_status {
+                    2 => "The display is blank. Restart capture when the display is available.",
+                    3 => "Display capture is suspended. Restart capture to resume.",
+                    _ => "Display capture stopped. Restart capture to resume.",
+                }
+                .into(),
+            )
+        } else if !idle
+            && self.snapshot.status == Status::Running
+            && update
+                .activity_age
+                .is_some_and(|age| age >= Duration::from_millis(250))
+        {
+            Some("Display capture stopped responding. Restart capture to resume.".into())
+        } else {
+            None
+        };
+        if let Some(message) = failure {
+            self.snapshot.status = Status::Error;
+            self.snapshot.message = message;
+            self.processor.image = None;
+        } else if let Some(frame) = update.frame {
+            match frame {
+                Ok(image) => {
+                    self.processor.image = Some(image);
+                    self.snapshot.status = Status::Running;
+                    self.snapshot.message = "Main display".into();
+                }
+                Err(error) => {
+                    self.snapshot.status = Status::Error;
+                    self.snapshot.message = error;
+                    self.processor.image = None;
+                }
+            }
+        }
+        observed_at
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct SyncService {
     inner: Arc<Mutex<Runtime>>,
@@ -76,6 +185,8 @@ impl SyncService {
                 let now = Instant::now();
                 let dt = now.duration_since(last).as_secs_f32();
                 last = now;
+                #[allow(unused_mut)]
+                let mut observed_at = now;
                 let snapshot = {
                     let mut rt = inner.lock().unwrap();
                     if rt.shutdown {
@@ -83,38 +194,16 @@ impl SyncService {
                     }
                     match rt.snapshot.status {
                         Status::Starting | Status::Running => {
-                            if rt.snapshot.source == Source::Simulation {
-                                rt.snapshot.status = Status::Running;
-                                rt.snapshot.message = "Animated colors".into();
-                            } else if rt.snapshot.source == Source::Test {
-                                if rt.snapshot.status == Status::Starting {
-                                    rt.processor.image = Some(generated_image());
-                                    rt.snapshot.status = Status::Running;
-                                    rt.snapshot.message = "Test image".into();
-                                }
+                            if rt.snapshot.source != Source::Display {
+                                rt.update_local_source();
                             } else {
                                 #[cfg(target_os = "macos")]
                                 {
                                     let stream =
                                         capture.get_or_insert_with(capture::Capture::start);
-                                    let (state, message) = stream.state();
-                                    if state == 4 {
-                                        rt.snapshot.status = Status::Error;
-                                        rt.snapshot.message = message;
+                                    observed_at = rt.update_display(stream.poll(), now);
+                                    if rt.snapshot.status == Status::Error {
                                         capture = None;
-                                    } else if let Some(frame) = stream.take_latest() {
-                                        match frame {
-                                            Ok(image) => {
-                                                rt.snapshot.message = "Main display".into();
-                                                rt.processor.image = Some(image);
-                                                rt.snapshot.status = Status::Running;
-                                            }
-                                            Err(error) => {
-                                                rt.snapshot.status = Status::Error;
-                                                rt.snapshot.message = error;
-                                                capture = None;
-                                            }
-                                        }
                                     }
                                 }
                                 #[cfg(not(target_os = "macos"))]
@@ -124,28 +213,7 @@ impl SyncService {
                                         "Display capture is available on macOS only.".into();
                                 }
                             }
-                            if rt.snapshot.status == Status::Running {
-                                if let Some(config) = rt.config.clone() {
-                                    rt.snapshot.colors = if rt.snapshot.source == Source::Simulation
-                                    {
-                                        let reduced_motion = rt.reduced_motion;
-                                        rt.simulation
-                                            .tick(dt as f64, &config, reduced_motion)
-                                            .colors
-                                            .into_iter()
-                                            .map(|c| LightColor {
-                                                id: c.id,
-                                                rgb: c.rgb,
-                                            })
-                                            .collect()
-                                    } else {
-                                        rt.processor.frame(
-                                            &config.rooms[0].lights,
-                                            config.preferences.brightness,
-                                        )
-                                    };
-                                }
-                            }
+                            rt.render(dt);
                             rt.snapshot.sequence += 1;
                         }
                         Status::Stopping => {
@@ -177,7 +245,11 @@ impl SyncService {
                     }
                     rt.snapshot.clone()
                 };
-                hardware.publish(&snapshot.colors, snapshot.status == Status::Running);
+                hardware.publish_at(
+                    &snapshot.colors,
+                    snapshot.status == Status::Running,
+                    observed_at,
+                );
                 if snapshot.sequence != last_emitted {
                     last_emitted = snapshot.sequence;
                     let _ = app.emit("sync-output", snapshot);
@@ -260,6 +332,182 @@ impl SyncService {
 mod tests {
     use super::*;
     use crate::config::{ConfigStore, Position};
+
+    fn configured(source: Source) -> SyncService {
+        let service = SyncService::default();
+        service.apply_saved(
+            serde_json::from_str(include_str!("../../../tests/fixtures/configuration.json"))
+                .unwrap(),
+        );
+        service.start(source).unwrap();
+        service
+    }
+
+    fn display_update(frame_status: i32, age_ms: u64, with_frame: bool) -> DisplayUpdate {
+        DisplayUpdate {
+            state: 1,
+            message: String::new(),
+            frame_status,
+            activity_age: Some(Duration::from_millis(age_ms)),
+            frame: with_frame.then(|| Ok(generated_image())),
+        }
+    }
+
+    #[test]
+    fn cached_display_polls_do_not_renew_the_source_watchdog() {
+        let service = configured(Source::Display);
+        let now = Instant::now();
+        let mut rt = service.inner.lock().unwrap();
+        assert_eq!(rt.update_display(display_update(0, 0, true), now), now);
+        rt.render(0.033);
+        let held = rt.snapshot.colors.clone();
+        assert!(!held.is_empty());
+        for age_ms in [33, 100, 249] {
+            let at = now + Duration::from_millis(age_ms);
+            assert_eq!(rt.update_display(display_update(0, age_ms, false), at), now);
+            rt.render(0.033);
+            assert_eq!(rt.snapshot.status, Status::Running);
+            assert_eq!(rt.snapshot.colors, held);
+        }
+        rt.update_display(
+            display_update(0, 250, false),
+            now + Duration::from_millis(250),
+        );
+        rt.render(0.033);
+        assert_eq!(rt.snapshot.status, Status::Error);
+        assert!(rt.processor.image.is_none());
+        assert_eq!(rt.snapshot.colors, held); // Virtual colors hold; physical output stops.
+        drop(rt);
+        assert_eq!(
+            service.start(Source::Test).unwrap().status,
+            Status::Starting
+        );
+        let mut rt = service.inner.lock().unwrap();
+        rt.update_local_source();
+        rt.render(0.033);
+        assert_eq!(rt.snapshot.status, Status::Running);
+    }
+
+    #[test]
+    fn fresh_idle_samples_and_static_test_source_repeat_without_pixel_changes() {
+        let service = configured(Source::Display);
+        let now = Instant::now();
+        let mut rt = service.inner.lock().unwrap();
+        rt.update_display(display_update(0, 0, true), now);
+        rt.render(0.033);
+        let held = rt.snapshot.colors.clone();
+        for elapsed in [100, 1_000, 60_000] {
+            let at = now + Duration::from_millis(elapsed);
+            assert_eq!(rt.update_display(display_update(1, 0, false), at), at);
+            rt.render(0.033);
+            assert_eq!(rt.snapshot.status, Status::Running);
+            assert_eq!(rt.snapshot.colors, held);
+        }
+        drop(rt);
+        let test = configured(Source::Test);
+        let mut rt = test.inner.lock().unwrap();
+        for dt in [0.033, 1.0, 60.0] {
+            rt.update_local_source();
+            rt.render(dt);
+            assert_eq!(rt.snapshot.status, Status::Running);
+            assert_eq!(rt.snapshot.colors, held);
+        }
+    }
+
+    #[test]
+    fn blank_suspended_stopped_and_failed_samples_stop_output_and_release_image() {
+        for frame_status in [2, 3, 5] {
+            let service = configured(Source::Display);
+            let now = Instant::now();
+            let mut rt = service.inner.lock().unwrap();
+            rt.update_display(display_update(0, 0, true), now);
+            rt.render(0.033);
+            let held = rt.snapshot.colors.clone();
+            rt.update_display(display_update(1, 60_000, false), now);
+            assert_eq!(rt.snapshot.status, Status::Running);
+            // Even a pending old Complete buffer cannot override these statuses.
+            rt.update_display(display_update(frame_status, 0, true), now);
+            rt.render(0.033);
+            assert_eq!(rt.snapshot.status, Status::Error);
+            assert!(rt.processor.image.is_none());
+            assert_eq!(rt.snapshot.colors, held);
+        }
+        for failed_decode in [false, true] {
+            let service = configured(Source::Display);
+            let mut update = display_update(0, 0, true);
+            if failed_decode {
+                update.frame = Some(Err("Invalid frame".into()));
+            } else {
+                update.state = 4;
+                update.message = "Capture failed".into();
+            }
+            let mut rt = service.inner.lock().unwrap();
+            rt.update_display(update, Instant::now());
+            assert_eq!(rt.snapshot.status, Status::Error);
+            assert!(rt.processor.image.is_none());
+        }
+    }
+
+    #[test]
+    fn startup_waits_for_first_image_without_treating_start_ack_as_a_frame() {
+        let service = configured(Source::Display);
+        let mut rt = service.inner.lock().unwrap();
+        for (status, age) in [(-1, 0), (-1, 250), (4, 1_000), (1, 60_000)] {
+            rt.update_display(display_update(status, age, false), Instant::now());
+            rt.render(0.033);
+            assert_eq!(rt.snapshot.status, Status::Starting);
+            assert!(rt.snapshot.colors.is_empty());
+        }
+        // Start completion has no API deadline for the first Complete frame;
+        // no physical output is requested before that frame arrives.
+        rt.update_display(display_update(0, 0, true), Instant::now());
+        rt.render(0.033);
+        assert_eq!(rt.snapshot.status, Status::Running);
+        assert!(!rt.snapshot.colors.is_empty());
+    }
+
+    #[test]
+    fn explicit_idle_persists_without_a_callback_heartbeat_but_can_be_invalidated() {
+        let service = configured(Source::Display);
+        let mut rt = service.inner.lock().unwrap();
+        let now = Instant::now();
+        rt.update_display(display_update(0, 0, true), now);
+        rt.render(0.033);
+        let held = rt.snapshot.colors.clone();
+        for elapsed in [33, 250, 1_000, 60_000] {
+            let at = now + Duration::from_millis(elapsed);
+            assert_eq!(rt.update_display(display_update(1, elapsed, false), at), at);
+            rt.render(0.033);
+            assert_eq!(rt.snapshot.status, Status::Running);
+            assert_eq!(rt.snapshot.colors, held);
+        }
+        // Once new content is declared, missing source progress is subject to
+        // the 250 ms watchdog again. Idle is not a permanently latched exemption.
+        let changed = now + Duration::from_secs(61);
+        rt.update_display(display_update(0, 0, true), changed);
+        let stalled = changed + Duration::from_millis(250);
+        assert_eq!(
+            rt.update_display(display_update(0, 250, false), stalled),
+            changed
+        );
+        assert_eq!(rt.snapshot.status, Status::Error);
+    }
+
+    #[test]
+    fn reduced_motion_updates_an_active_simulation_without_restarting_it() {
+        let service = configured(Source::Simulation);
+        {
+            let mut rt = service.inner.lock().unwrap();
+            rt.update_local_source();
+            rt.render(0.033);
+        }
+        service.set_reduced_motion(true);
+        let mut rt = service.inner.lock().unwrap();
+        assert_eq!(rt.snapshot.status, Status::Running);
+        assert!(rt.reduced_motion);
+        rt.render(0.033);
+        assert!(!rt.snapshot.colors.is_empty());
+    }
 
     #[test]
     fn only_acknowledged_revisions_retarget_the_output() {

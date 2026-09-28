@@ -85,4 +85,32 @@ describe('passive native color output', () => {
     await output.connect();
     await expect(output.start('test')).rejects.toThrow('desktop');
   });
+  it('orders live Reduce Motion and Stop after an in-flight Start', async () => {
+    const gate = deferred();
+    const calls: unknown[] = [];
+    const output = new NativeSyncOutput(true, {
+      listen: async () => () => {},
+      invoke: async <T>(command: string, args?: Record<string, unknown>) => {
+        calls.push([command, args]);
+        if (command === 'start_sync') await gate.promise;
+        return initial as T;
+      },
+    });
+    await output.connect();
+    const starting = output.start('simulation');
+    const changing = output.setReducedMotion(true);
+    const stopping = output.stop();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls).toEqual([
+      ['sync_snapshot', undefined],
+      ['start_sync', { source: 'simulation', reducedMotion: false }],
+    ]);
+    gate.resolve();
+    await Promise.all([starting, changing, stopping]);
+    expect(calls.slice(2)).toEqual([
+      ['set_reduced_motion', { reducedMotion: true }],
+      ['stop_sync', undefined],
+    ]);
+  });
 });
