@@ -9,6 +9,7 @@
 #include <esp_wifi.h>
 #include <esp_efuse.h>
 #include "stream_protocol.h"
+#include "wifi_credentials.h"
 
 using namespace iotensity;
 constexpr uint16_t kHttpPort = 80;
@@ -217,8 +218,12 @@ void provision_serial() {
     valid = valid && json["ssid"].is<const char*>() && json["password"].is<const char*>();
     const String ssid = json["ssid"] | "";
     const String password = json["password"] | "";
-    if (!valid || ssid.length() < 1 || ssid.length() > 32 || password.length() > 63) {
+    if (!valid || !valid_wifi_ssid(ssid.length())) {
       Serial.println("Invalid provisioning message."); continue;
+    }
+    if (!valid_wifi_password(password.c_str(), password.length())) {
+      Serial.println("Invalid Wi-Fi password: use none, 8-63 printable ASCII characters or 64 hex digits.");
+      continue;
     }
     StaticJsonDocument<384> settings;
     settings["ssid"] = ssid; settings["password"] = password;

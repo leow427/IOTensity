@@ -31,7 +31,7 @@ At 115200 baud send **one JSON line** with the Wi-Fi SSID and password, followed
 { "ssid": "YOUR_2_4_GHZ_NETWORK", "password": "YOUR_WIFI_PASSWORD" }
 ```
 
-Enter this in the serial monitor, not a shell command/history or repository file. The ESP32 stores it in its NVS `wifi` namespace and restarts. It does not echo credentials. The Wi-Fi driver is not allowed to keep its own copy. Sending `{"reset":true}` erases those Wi-Fi settings, including any driver copy saved by older firmware, and restarts; it does not change hardware identity. Credentials are development provisioning data, not encrypted user accounts. A future provisioning flow can replace `provision_serial()` without changing identity, discovery, or the receiver.
+The SSID must be 1–32 bytes. The password must be empty for an open network, an 8–63 character printable ASCII WPA passphrase, or a 64 hex digit raw PSK; anything else is rejected without saving. Enter this in the serial monitor, not a shell command/history or repository file. The ESP32 stores it in its NVS `wifi` namespace and restarts. It does not echo credentials. The Wi-Fi driver is not allowed to keep its own copy. Sending `{"reset":true}` erases those Wi-Fi settings, including any driver copy saved by older firmware, and restarts; it does not change hardware identity. Credentials are development provisioning data, not encrypted user accounts. A future provisioning flow can replace `provision_serial()` without changing identity, discovery, or the receiver.
 
 The boot log prints `esp32-<12 lowercase hex digits>` and a services-ready message. The short recognition name is `IOT-<last six hex digits in uppercase>`. Short names can collide; the app always binds the full ID.
 
