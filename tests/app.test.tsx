@@ -139,6 +139,23 @@ describe('room editing UI', () => {
     ).toBeInTheDocument();
     expect(screen.queryByText('● UNSAVED CHANGES')).not.toBeInTheDocument();
   });
+  it('clears the selection with Escape on the page but not while editing a field', async () => {
+    const { user, store } = await setup();
+    await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
+    await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
+    const selected = store.getSnapshot().selectedLightId;
+    const name = screen.getByLabelText('Name');
+    await user.click(name);
+    await user.keyboard('{Escape}');
+    expect(store.getSnapshot().selectedLightId).toBe(selected);
+    expect(name).toHaveFocus();
+    await user.click(screen.getByLabelText('Left / right coordinate'));
+    await user.keyboard('{Escape}');
+    expect(store.getSnapshot().selectedLightId).toBe(selected);
+    screen.getByRole('button', { name: 'Select Light 1' }).focus();
+    await user.keyboard('{Escape}');
+    expect(store.getSnapshot().selectedLightId).toBeNull();
+  });
   it('uses an accessible navigation dialog and displays failed saves with the draft intact', async () => {
     const { user, persistence } = await setup();
     await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
@@ -273,5 +290,35 @@ describe('physical light UI', () => {
     expect(
       screen.queryByRole('group', { name: 'Virtual lights' }),
     ).not.toBeInTheDocument();
+  });
+  it('lets Escape close the bind dialog without clearing the selection or losing focus', async () => {
+    const { user, store } = await setup({
+      available: true,
+      async preview() {},
+      async identify() {},
+      async retryDiscovery() {},
+      dispose() {},
+      async connect(receive) {
+        receive({ devices: [], outputError: null, discoveryError: null });
+      },
+    });
+    await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
+    await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
+    const selected = store.getSnapshot().selectedLightId;
+    const bind = screen.getByRole('button', { name: 'Bind physical light' });
+    await user.click(bind);
+    const dialog = screen.getByRole('dialog');
+    expect(
+      within(dialog).getByRole('button', { name: 'Close physical lights' }),
+    ).toHaveFocus();
+    // jsdom has no close requests: send the keydown, then the dialog's cancel.
+    await user.keyboard('{Escape}');
+    expect(store.getSnapshot().selectedLightId).toBe(selected);
+    fireEvent(dialog, new Event('cancel', { cancelable: true }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(store.getSnapshot().selectedLightId).toBe(selected);
+    expect(
+      screen.getByRole('button', { name: 'Bind physical light' }),
+    ).toHaveFocus();
   });
 });

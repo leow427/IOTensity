@@ -44,9 +44,26 @@ test('both screens meet WCAG AA automated accessibility checks', async ({
     .withTags(['wcag2a', 'wcag2aa', 'wcag21aa'])
     .analyze();
   expect(discovery.violations).toEqual([]);
+  const card = page.getByRole('button', { name: 'Select Light 1' });
   await page.keyboard.press('Escape');
   await expect(dialog).not.toBeVisible();
   await expect(addPhysical).toBeFocused();
+  await expect(card).toHaveAttribute('aria-pressed', 'true');
+  const bind = page.getByRole('button', { name: 'Bind physical light' });
+  await bind.click();
+  await expect(
+    page.getByRole('dialog', { name: 'Connect Light 1' }),
+  ).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+  await expect(bind).toBeFocused();
+  await expect(card).toHaveAttribute('aria-pressed', 'true');
+  await page.getByLabel('Name').focus();
+  await page.keyboard.press('Escape');
+  await expect(card).toHaveAttribute('aria-pressed', 'true');
+  await card.focus();
+  await page.keyboard.press('Escape');
+  await expect(card).toHaveAttribute('aria-pressed', 'false');
   await expect(
     page
       .getByRole('group', { name: 'Virtual lights', exact: true })
