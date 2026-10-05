@@ -1,9 +1,16 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, fs, io::Write, path::PathBuf, sync::Mutex};
+use std::{
+    collections::HashSet,
+    fs,
+    io::{Read, Write},
+    path::PathBuf,
+    sync::Mutex,
+};
 
 pub const X_BOUNDS: (f64, f64) = (-3.0, 3.0);
 pub const Y_BOUNDS: (f64, f64) = (0.15, 3.0);
 const MAX_SAFE_REVISION: u64 = 9_007_199_254_740_991;
+const MAX_CONFIGURATION_BYTES: u64 = 1_048_576;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -185,20 +192,25 @@ impl ConfigStore {
     }
 
     fn read(&self) -> Result<Configuration, ConfigError> {
-        let metadata = match fs::metadata(&self.path) {
-            Ok(metadata) => metadata,
+        let file = match fs::File::open(&self.path) {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Configuration::default())
             }
             Err(error) => return Err(ConfigError::io(error)),
         };
-        if metadata.len() > 1_048_576 {
+        // Bound the read itself rather than a prior size check, so a file that
+        // grows after opening still cannot exceed the limit in memory.
+        let mut bytes = Vec::new();
+        file.take(MAX_CONFIGURATION_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(ConfigError::io)?;
+        if bytes.len() as u64 > MAX_CONFIGURATION_BYTES {
             return Err(ConfigError::new(
                 "invalid",
                 "Configuration exceeds 1 MB. The file has not been changed.",
             ));
         }
-        let bytes = fs::read(&self.path).map_err(ConfigError::io)?;
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| ConfigError::new("invalid", format!("Configuration is malformed ({error}). Restore a valid backup in the application data folder, then retry. The file has not been changed.")))?;
         decode_configuration(value)
     }
@@ -262,6 +274,16 @@ impl ConfigStore {
         temporary
             .persist(&self.path)
             .map_err(|error| ConfigError::io(error.error))?;
+        // Flush the directory entry so a power loss cannot revert an acknowledged
+        // rename. Best-effort: the new file already replaced the target, so an
+        // error here would desynchronize the caller's acknowledgement from the
+        // file on disk and make its next save a revision conflict. The sidecar
+        // lock is still held. Windows cannot open directories this way; there
+        // tempfile replaces via MoveFileExW and NTFS metadata journaling applies.
+        #[cfg(unix)]
+        if let Ok(directory) = fs::File::open(parent) {
+            let _ = directory.sync_all();
+        }
         Ok(config)
     }
 }
