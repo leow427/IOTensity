@@ -1,10 +1,12 @@
 fn main() {
     println!("cargo:rerun-if-changed=src/sync/capture.m");
     println!("cargo:rerun-if-changed=src/overlay.m");
+    println!("cargo:rerun-if-changed=src/activity.m");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         cc::Build::new()
             .file("src/sync/capture.m")
             .file("src/overlay.m")
+            .file("src/activity.m")
             .flag("-fobjc-arc")
             .flag("-mmacosx-version-min=12.3")
             .compile("iotensity_capture");
