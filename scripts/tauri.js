@@ -19,6 +19,7 @@ import {
 const root = fileURLToPath(new URL('../', import.meta.url));
 const args = process.argv.slice(2);
 const env = { ...process.env };
+let fingerprint;
 
 try {
   if (isMacBundle(process.platform, args)) {
@@ -52,6 +53,7 @@ try {
       );
     }
     env.APPLE_SIGNING_IDENTITY = identity.name;
+    fingerprint = identity.fingerprint;
     console.log(
       'Using the pinned macOS signing identity; unsigned fallback is disabled.',
     );
@@ -97,7 +99,9 @@ try {
     process.exitCode = code ?? 1;
     if (code === 0 && installation) {
       try {
-        console.log(`Installed current build: ${installBundle(installation)}`);
+        console.log(
+          `Installed current build: ${installBundle({ ...installation, fingerprint })}`,
+        );
       } catch (error) {
         console.error(
           `Build completed, but installation failed: ${error.message}`,
