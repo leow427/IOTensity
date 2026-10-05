@@ -18,6 +18,8 @@ export function LightCards({
 }) {
   const store = useStore();
   const elements = useRef(new Map<string, HTMLElement>());
+  // Last painted color per element; remounted elements start unpainted.
+  const painted = useRef(new WeakMap<HTMLElement, string>());
   const row = useRef<HTMLDivElement>(null);
   useEffect(() => {
     let frame = 0;
@@ -30,7 +32,10 @@ export function LightCards({
           store.output.getColor(light.id),
           editable && light.id === selectedId ? mode : undefined,
         );
-        element.style.setProperty('--light-color', colorCss(rgb));
+        const color = colorCss(rgb);
+        if (painted.current.get(element) === color) continue;
+        painted.current.set(element, color);
+        element.style.setProperty('--light-color', color);
         element.style.setProperty(
           '--light-tint',
           colorCss(mixColor([0.88, 0.88, 0.83], rgb, 0.22)),

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { INTENSITIES } from '../domain/model';
 import { useAppState, useStore } from '../state/context';
 import { RoomScene } from '../scene/RoomScene';
@@ -30,6 +30,18 @@ export function SyncPage() {
   const state = useAppState();
   const [resetKey, setResetKey] = useState(0);
   const room = state.saved!.rooms[0];
+  // Stable per-kind arrays keep the card paint loops running across unrelated renders.
+  const groups = useMemo(
+    () =>
+      (['virtual', 'esp32'] as const).map(
+        (kind) =>
+          [
+            kind,
+            room.lights.filter((item) => item.output.kind === kind),
+          ] as const,
+      ),
+    [room.lights],
+  );
   return (
     <section className="page sync-page" aria-labelledby="sync-title">
       <header className="page-heading">
@@ -91,11 +103,8 @@ export function SyncPage() {
             </div>
             {room.lights.length ? (
               <>
-                {(['virtual', 'esp32'] as const).map((kind) => {
-                  const lights = room.lights.filter(
-                    (light) => light.output.kind === kind,
-                  );
-                  return lights.length ? (
+                {groups.map(([kind, lights]) =>
+                  lights.length ? (
                     <div className="output-group" key={kind}>
                       <h3 className="eyebrow mono">
                         {kind === 'virtual'
@@ -104,8 +113,8 @@ export function SyncPage() {
                       </h3>
                       <LightCards lights={lights} />
                     </div>
-                  ) : null;
-                })}
+                  ) : null,
+                )}
               </>
             ) : (
               <div className="empty-output">

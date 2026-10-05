@@ -116,6 +116,39 @@ describe('room editing UI', () => {
     ).not.toBeInTheDocument();
     expect(renamed).toHaveAttribute('aria-pressed', 'true');
   });
+  it('keeps the card paint loop across unrelated renders and skips unchanged colors', async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((paint) => {
+      frames.push(paint);
+      return frames.length;
+    });
+    const cancel = vi
+      .spyOn(window, 'cancelAnimationFrame')
+      .mockImplementation(() => {});
+    const { user, store } = await setup();
+    await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
+    await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
+    act(() => store.selectLight(null));
+    const card = screen.getByRole('button', { name: 'Select Light 1' });
+    const cancelled = cancel.mock.calls.length;
+    const started = frames.length;
+    act(() => store.setSyncSource('display'));
+    expect(store.getSnapshot().syncSource).toBe('display');
+    expect(cancel).toHaveBeenCalledTimes(cancelled);
+    expect(frames).toHaveLength(started);
+
+    const setProperty = vi.spyOn(card.style, 'setProperty');
+    frames.at(-1)!(0);
+    frames.at(-1)!(16);
+    expect(setProperty).not.toHaveBeenCalled();
+    store.output.getColor = () => [1, 0, 0];
+    frames.at(-1)!(32);
+    expect(setProperty).toHaveBeenCalledWith('--light-color', 'rgb(255 0 0)');
+    expect(card).toHaveStyle('--light-color: rgb(255 0 0)');
+    setProperty.mockClear();
+    frames.at(-1)!(48);
+    expect(setProperty).not.toHaveBeenCalled();
+  });
   it('saves via the keyboard, marks icon edits dirty and restores the saved card on confirmed discard', async () => {
     const { user, persistence } = await setup();
     await user.click(screen.getByRole('button', { name: 'Your Rooms' }));

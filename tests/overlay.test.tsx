@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { MiniRoomScene } from '../src/ui/MiniRoom';
 import { LightCards } from '../src/ui/LightCards';
 import { StoreProvider } from '../src/state/context';
@@ -55,6 +55,29 @@ describe('read-only mini room geometry', () => {
       Number(container.querySelector('circle')!.getAttribute('cy')),
     ).toBeLessThan(Number(before));
     expect(room.lights[0].position.y).toBe(1.2);
+    unmount();
+    output.dispose();
+  });
+  it('repaints an orb only when its final color changes', () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((paint) => {
+      frames.push(paint);
+      return frames.length;
+    });
+    const output = new FakeOutput();
+    output.getColor = () => [0, 0, 1];
+    const room = clone(fixture.rooms[0]) as Room;
+    const { container, unmount } = render(
+      <MiniRoomScene room={room} output={output} />,
+    );
+    const circle = container.querySelector('circle')!;
+    expect(circle).toHaveAttribute('fill', 'rgb(0 0 255)');
+    const setAttribute = vi.spyOn(circle, 'setAttribute');
+    frames.at(-1)!(16);
+    expect(setAttribute).not.toHaveBeenCalled();
+    output.getColor = () => [1, 0, 0];
+    frames.at(-1)!(32);
+    expect(circle).toHaveAttribute('fill', 'rgb(255 0 0)');
     unmount();
     output.dispose();
   });

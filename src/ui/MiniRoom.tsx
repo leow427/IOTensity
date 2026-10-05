@@ -24,16 +24,18 @@ export function MiniRoomScene({
   output: SyncOutput;
 }) {
   const elements = useRef(new Map<string, SVGCircleElement>());
+  // Last painted fill per element; remounted elements start unpainted.
+  const painted = useRef(new WeakMap<SVGCircleElement, string>());
   useEffect(() => {
     let frame = 0;
     const paint = () => {
       for (const light of room.lights) {
         const element = elements.current.get(light.id);
-        if (element)
-          element.setAttribute(
-            'fill',
-            colorCss(resolveColor(light, output.getColor(light.id))),
-          );
+        if (!element) continue;
+        const fill = colorCss(resolveColor(light, output.getColor(light.id)));
+        if (painted.current.get(element) === fill) continue;
+        painted.current.set(element, fill);
+        element.setAttribute('fill', fill);
       }
       frame = requestAnimationFrame(paint);
     };
