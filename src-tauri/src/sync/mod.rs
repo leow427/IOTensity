@@ -90,8 +90,12 @@ impl Runtime {
                     })
                     .collect()
             } else {
-                self.processor
-                    .frame(&config.rooms[0].lights, config.preferences.brightness)
+                // Every room shares the same screen mapping, in the same light
+                // order as the simulation and hardware bindings.
+                self.processor.frame(
+                    config.rooms.iter().flat_map(|r| &r.lights),
+                    config.preferences.brightness,
+                )
             };
         }
     }
@@ -268,10 +272,14 @@ impl SyncService {
         {
             return;
         }
-        rt.snapshot
-            .colors
-            .retain(|color| config.rooms[0].lights.iter().any(|l| l.id == color.id));
-        if config.rooms[0].lights.is_empty()
+        rt.snapshot.colors.retain(|color| {
+            config
+                .rooms
+                .iter()
+                .flat_map(|r| &r.lights)
+                .any(|l| l.id == color.id)
+        });
+        if config.rooms.iter().all(|r| r.lights.is_empty())
             && matches!(rt.snapshot.status, Status::Starting | Status::Running)
         {
             rt.snapshot.status = Status::Stopping;
@@ -293,7 +301,7 @@ impl SyncService {
         if rt
             .config
             .as_ref()
-            .is_none_or(|c| c.rooms[0].lights.is_empty())
+            .is_none_or(|c| c.rooms.iter().all(|r| r.lights.is_empty()))
         {
             return Err("Save at least one light before starting sync.".into());
         }
@@ -542,6 +550,57 @@ mod tests {
             &acknowledged
         );
         assert_eq!(service.snapshot().status, Status::Stopped);
+    }
+
+    #[test]
+    fn display_and_test_sources_drive_lights_in_every_room() {
+        let single: Configuration =
+            serde_json::from_str(include_str!("../../../tests/fixtures/configuration.json"))
+                .unwrap();
+        let mut split = single.clone();
+        let moved = split.rooms[0].lights.split_off(2);
+        split.rooms.push(crate::config::Room {
+            id: "den".into(),
+            name: "Den".into(),
+            lights: moved,
+        });
+        let render = |config: &Configuration, source: Source| {
+            let service = SyncService::default();
+            service.apply_saved(config.clone());
+            service.start(source).unwrap();
+            let mut rt = service.inner.lock().unwrap();
+            if source == Source::Display {
+                rt.update_display(display_update(0, 0, true), Instant::now());
+            } else {
+                rt.update_local_source();
+            }
+            rt.render(0.033);
+            assert_eq!(rt.snapshot.status, Status::Running);
+            rt.snapshot.colors.clone()
+        };
+        let simulated: Vec<_> = crate::hardware::engine::Simulation::default()
+            .tick(0.033, &split, false)
+            .colors
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        for source in [Source::Display, Source::Test] {
+            let colors = render(&split, source);
+            // Same lights, same order as the simulation; rooms share one mapping.
+            assert_eq!(
+                colors.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
+                simulated
+            );
+            assert_eq!(colors, render(&single, source));
+            assert!(colors
+                .iter()
+                .any(|c| c.id == split.rooms[1].lights[0].id && c.rgb != [0; 3]));
+        }
+        // A configuration whose only lights are outside the first room can start.
+        let mut later_only = split.clone();
+        later_only.rooms[0].lights.clear();
+        let colors = render(&later_only, Source::Test);
+        assert_eq!(colors.len(), later_only.rooms[1].lights.len());
     }
 
     #[test]
