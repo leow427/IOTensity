@@ -1,7 +1,6 @@
 //! IOTL v1: one complete RGB value, network byte order, no per-frame ACKs.
 pub const PACKET_LEN: usize = 29;
 pub const VERSION: u8 = 1;
-pub const TIMEOUT_MS: u32 = 1_000;
 pub type Session = [u8; 16];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +19,8 @@ impl Frame {
         bytes[26..].copy_from_slice(&self.rgb);
         bytes
     }
+    /// Test-only mirror of the firmware receiver, checked against the shared golden vector.
+    #[cfg(test)]
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         if bytes.len() != PACKET_LEN
             || &bytes[..4] != b"IOTL"
@@ -36,7 +37,9 @@ impl Frame {
     }
 }
 
-/// RFC 1982 serial arithmetic. Exactly half the range is ambiguous and rejected.
+/// RFC 1982 serial arithmetic, mirroring the firmware receiver's acceptance rule.
+/// Exactly half the range is ambiguous and rejected.
+#[cfg(test)]
 pub fn newer(sequence: u32, previous: u32) -> bool {
     let distance = sequence.wrapping_sub(previous);
     distance != 0 && distance < 0x8000_0000

@@ -87,7 +87,6 @@ fn wish() -> Wish {
     Wish {
         epoch: 1,
         light_id: Some("logical-room-light".into()),
-        running: true,
         endpoints: vec![SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 20), 80)],
     }
 }
@@ -127,7 +126,7 @@ fn reboot_dhcp_outage_and_stop_preserve_binding_and_renew_sessions() {
     control.failed.set(false);
     control.status.borrow_mut().session_id = None;
     assert!(connection.step(7000, &wish, &control).target.is_some());
-    wish.running = false;
+    wish.light_id = None;
     wish.epoch += 1;
     assert!(connection.step(7001, &wish, &control).target.is_none());
     assert_eq!(control.stopped.get(), 1);
