@@ -162,6 +162,11 @@ export function App() {
           </div>
         </aside>
         <main>
+          {state.closeError && (
+            <div className="error-banner close-error" role="alert">
+              Couldn’t close the window. {state.closeError}
+            </div>
+          )}
           {state.phase === 'loading' && (
             <div className="app-message">
               <BrandMark />
@@ -201,6 +206,14 @@ export function App() {
                   >
                     Retry
                   </button>
+                  {state.closeBlockedByPreferences && (
+                    <button
+                      className="text-button"
+                      onClick={() => store.closeWithoutSavingPreferences()}
+                    >
+                      Close Without Saving
+                    </button>
+                  )}
                 </div>
               )}
               {state.page === 'sync' ? <SyncPage /> : <RoomEditor />}

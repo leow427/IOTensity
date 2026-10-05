@@ -44,6 +44,8 @@ export type AppState = {
   saveError: string | null;
   preferenceError: string | null;
   preferenceSaving: boolean;
+  closeBlockedByPreferences: boolean;
+  closeError: string | null;
   running: boolean;
   devices: Device[];
   discoveryError: string | null;
@@ -73,6 +75,8 @@ export class AppStore {
     saveError: null,
     preferenceError: null,
     preferenceSaving: false,
+    closeBlockedByPreferences: false,
+    closeError: null,
     running: false,
     devices: [],
     discoveryError: null,
@@ -409,7 +413,11 @@ export class AppStore {
         0,
         Math.min(100, Math.round(patch.brightness)),
       );
-    this.set({ preferences, preferenceError: null });
+    this.set({
+      preferences,
+      preferenceError: null,
+      closeBlockedByPreferences: false,
+    });
 
     if (this.preferenceTimer) clearTimeout(this.preferenceTimer);
     this.preferenceTimer = setTimeout(() => {
@@ -433,7 +441,7 @@ export class AppStore {
       await this.commit((config) => {
         config.preferences = snapshot;
       });
-      this.set({ preferenceError: null });
+      this.set({ preferenceError: null, closeBlockedByPreferences: false });
       return true;
     } catch (error) {
       this.set({ preferenceError: errorMessage(error) });
@@ -493,6 +501,7 @@ export class AppStore {
   async requestTransition(destination: Destination) {
     if (destination === this.state.page) return;
     this.clearLightPreview();
+    if (destination === 'close') this.set({ closeError: null });
     if (this.dirty || this.state.saveStatus === 'saving') {
       this.set({ pending: destination });
       return;
@@ -533,11 +542,14 @@ export class AppStore {
             this.set({ readyToClose: true });
             return;
           }
-          if (
-            !(await this.savePreferences()) ||
-            generation !== this.closeGeneration
-          )
+          if (!(await this.savePreferences())) {
+            // Keep the safe default, but offer an explicit escape when the
+            // flush cannot succeed (for example after a revision conflict).
+            if (generation === this.closeGeneration)
+              this.set({ closeBlockedByPreferences: true });
             return;
+          }
+          if (generation !== this.closeGeneration) return;
           if (this.dirty || this.getSnapshot().saveStatus === 'saving')
             continue;
           if (
@@ -554,8 +566,27 @@ export class AppStore {
       }
     } else if (destination !== 'discard') this.set({ page: destination });
   }
+  // Closes after a failed close-time preference flush without retrying it.
+  // Unsaved room edits still go through the Save/Discard/Stay guard.
+  closeWithoutSavingPreferences() {
+    if (!this.state.closeBlockedByPreferences || this.state.readyToClose)
+      return;
+    this.clearLightPreview();
+    if (this.dirty || this.state.saveStatus === 'saving') {
+      this.set({ pending: 'close' });
+      return;
+    }
+    this.closeGeneration++;
+    if (this.preferenceTimer) clearTimeout(this.preferenceTimer);
+    this.preferenceTimer = null;
+    this.set({
+      readyToClose: true,
+      closeBlockedByPreferences: false,
+      closeError: null,
+    });
+  }
   closeFailed(error: unknown) {
-    this.set({ readyToClose: false, preferenceError: errorMessage(error) });
+    this.set({ readyToClose: false, closeError: errorMessage(error) });
   }
   dispose() {
     this.clearLightPreview();

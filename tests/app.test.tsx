@@ -156,6 +156,23 @@ describe('room editing UI', () => {
       screen.getByRole('button', { name: 'Select Light 1' }),
     ).toBeInTheDocument();
   });
+  it('offers a keyboard-accessible close without saving after a failed close-time preference flush', async () => {
+    const { store, persistence, user } = await setup();
+    act(() => store.setPreferences({ brightness: 25 }));
+    persistence.error = new Error('Revision conflict');
+    await act(() => store.requestTransition('close'));
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('Preferences not saved. Revision conflict');
+    const escape = within(alert).getByRole('button', {
+      name: 'Close Without Saving',
+    });
+    act(() => within(alert).getByRole('button', { name: 'Retry' }).focus());
+    await user.tab();
+    expect(escape).toHaveFocus();
+    await user.keyboard('{Enter}');
+    expect(store.getSnapshot().readyToClose).toBe(true);
+    expect(persistence.config.preferences.brightness).toBe(75);
+  });
 });
 
 describe('physical light UI', () => {
