@@ -289,8 +289,17 @@ test('browser preview: Reset view is exact after orbiting into a limit', async (
     await page.mouse.move(start.x + dx, start.y + dy, { steps: 8 });
     await page.mouse.up();
     // A camera clamped at a limit looks settled while damping momentum is
-    // still draining; allow the two seconds it takes.
-    await page.waitForTimeout(3_000);
+    // still draining; wait out the scene's 120 settle frames by counting
+    // animation frames, so slow CI renderers get the same drain.
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          let frames = 0;
+          const tick = () =>
+            ++frames >= 130 ? resolve() : requestAnimationFrame(tick);
+          requestAnimationFrame(tick);
+        }),
+    );
     return settled(canvas);
   };
   const reset = async () => {
