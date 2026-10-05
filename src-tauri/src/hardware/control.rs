@@ -45,6 +45,8 @@ pub trait Control {
     fn stop(&self, endpoint: SocketAddrV4, id: &str, session: Session) -> Result<(), String>;
     fn identify(&self, endpoint: SocketAddrV4, id: &str) -> Result<(), String>;
 }
+/// Cheap to clone: device workers share one client and its runtime thread.
+#[derive(Clone)]
 pub struct HttpControl(Client);
 impl HttpControl {
     pub fn new() -> Result<Self, String> {

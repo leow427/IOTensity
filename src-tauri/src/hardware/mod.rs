@@ -11,7 +11,7 @@ use engine::OutputSnapshot;
 use mdns_sd::{DaemonEvent, ServiceDaemon, ServiceEvent};
 use serde::Serialize;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     net::{Ipv4Addr, SocketAddrV4, UdpSocket},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -31,6 +31,10 @@ pub const STALL_TIMEOUT: Duration = Duration::from_millis(250);
 const DISCOVERY_RETRY_DELAY: Duration = Duration::from_secs(2);
 const DAEMON_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 const IDENTIFY_TIMEOUT: Duration = Duration::from_secs(4);
+/// Unbound lights that stay offline and unadvertised this long are forgotten.
+const DEVICE_GRACE: Duration = Duration::from_secs(5 * 60);
+/// Delay before replacing a device worker that could not be started.
+const WORKER_RETRY: Duration = Duration::from_secs(5);
 type IdentifyReply = mpsc::SyncSender<Result<(), String>>;
 struct PendingIdentify {
     request: u64,
@@ -61,7 +65,10 @@ struct Device {
     // Runtime only: neither endpoints nor stream state appear in Configuration.
     advertisements: HashMap<String, Vec<SocketAddrV4>>,
     connection: ConnectionState,
-    worker: bool,
+    /// Generation of the only worker allowed to control this entry.
+    worker: Option<u64>,
+    worker_retry: Option<Instant>,
+    idle_since: Option<Instant>,
     identify: Option<PendingIdentify>,
 }
 #[derive(Default)]
@@ -77,6 +84,7 @@ struct State {
     last_publish: Option<Instant>,
     preview: Option<preview::Preview>,
     identify_requests: u64,
+    workers: u64,
 }
 impl State {
     fn queue_identify(
@@ -212,6 +220,61 @@ impl State {
                 device.connection = ConnectionState::default();
             }
         }
+    }
+    /// Saved bindings are kept forever; other offline, unadvertised entries are
+    /// forgotten after a grace period so they release their worker and slot.
+    fn prune_devices(&mut self, now: Instant) {
+        let bound: HashSet<&str> = self
+            .config
+            .rooms
+            .iter()
+            .flat_map(|r| &r.lights)
+            .filter_map(|light| match &light.output {
+                LightOutput::Esp32 { device_id } => Some(device_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        self.devices.retain(|id, device| {
+            if bound.contains(id.as_str())
+                || device.connection.online
+                || !device.advertisements.is_empty()
+            {
+                device.idle_since = None;
+                return true;
+            }
+            now.duration_since(*device.idle_since.get_or_insert(now)) < DEVICE_GRACE
+        });
+    }
+    /// Assign a fresh worker generation to each entry that needs a worker.
+    fn claim_workers(&mut self, now: Instant) -> Vec<(String, u64)> {
+        let mut claims = Vec::new();
+        for (id, device) in &mut self.devices {
+            if device.worker.is_none() && device.worker_retry.is_none_or(|at| now >= at) {
+                self.workers += 1;
+                device.worker = Some(self.workers);
+                device.worker_retry = None;
+                claims.push((id.clone(), self.workers));
+            }
+        }
+        claims
+    }
+    fn worker_failed(&mut self, id: &str, generation: u64, error: String, now: Instant) {
+        if let Some(device) = self
+            .devices
+            .get_mut(id)
+            .filter(|d| d.worker == Some(generation))
+        {
+            device.worker = None;
+            device.worker_retry = Some(now + WORKER_RETRY);
+            device.connection.message = error;
+        }
+    }
+    /// A removed or replaced entry ends its old worker instead of sharing control.
+    fn worker_wish(&self, id: &str, generation: u64) -> Option<Wish> {
+        self.devices
+            .get(id)
+            .filter(|d| d.worker == Some(generation))?;
+        self.wish(id)
     }
     fn binding(&self, id: &str) -> Option<String> {
         self.config
@@ -483,6 +546,7 @@ impl HardwareService {
         let mut previous = None;
         let clock = Instant::now();
         let mut recovery = discovery::Recovery::default();
+        let mut control: Option<HttpControl> = None;
         while !self.is_shutdown() {
             let daemon = match ServiceDaemon::new() {
                 Ok(daemon) => daemon,
@@ -587,20 +651,39 @@ impl HardwareService {
                     }
                     searched = Instant::now();
                 }
-                let mut state = self.0.state.lock().unwrap();
-                for (id, device) in &mut state.devices {
-                    if !device.worker {
-                        let worker = self.clone();
-                        let id = id.clone();
-                        match thread::Builder::new()
-                            .name("iotensity-device".into())
-                            .spawn(move || worker.device_loop(id))
-                        {
-                            Ok(_) => device.worker = true,
-                            Err(error) => device.connection.message = error.to_string(),
-                        }
+                let now = Instant::now();
+                let claims = {
+                    let mut state = self.0.state.lock().unwrap();
+                    state.prune_devices(now);
+                    state.claim_workers(now)
+                };
+                // One bounded HTTP client (and runtime thread) serves every device worker.
+                let mut unavailable = String::new();
+                if !claims.is_empty() && control.is_none() {
+                    match HttpControl::new() {
+                        Ok(shared) => control = Some(shared),
+                        Err(error) => unavailable = error,
                     }
                 }
+                for (id, generation) in claims {
+                    let spawned = match &control {
+                        Some(shared) => {
+                            let worker = self.clone();
+                            let (id, shared) = (id.clone(), shared.clone());
+                            thread::Builder::new()
+                                .name("iotensity-device".into())
+                                .spawn(move || worker.device_loop(id, generation, shared))
+                                .map(drop)
+                                .map_err(|e| e.to_string())
+                        }
+                        None => Err(unavailable.clone()),
+                    };
+                    if let Err(error) = spawned {
+                        let mut state = self.0.state.lock().unwrap();
+                        state.worker_failed(&id, generation, error, now);
+                    }
+                }
+                let state = self.0.state.lock().unwrap();
                 if verified.elapsed() >= Duration::from_secs(5) {
                     for device in state.devices.values().filter(|d| !d.connection.online) {
                         for name in device.advertisements.keys() {
@@ -624,21 +707,11 @@ impl HardwareService {
         publish(self.devices());
         wait_unless_shutdown(&self.0.shutdown, DISCOVERY_RETRY_DELAY);
     }
-    fn device_loop(&self, id: String) {
-        let control = match HttpControl::new() {
-            Ok(control) => control,
-            Err(error) => {
-                if let Some(device) = self.0.state.lock().unwrap().devices.get_mut(&id) {
-                    device.connection.message = error;
-                    device.worker = false;
-                }
-                return;
-            }
-        };
+    fn device_loop(&self, id: String, generation: u64, control: HttpControl) {
         let mut connection = Connection::new(id.clone(), self.0.client_id.clone());
         let start = Instant::now();
         while !self.is_shutdown() {
-            let wish = self.0.state.lock().unwrap().wish(&id);
+            let wish = self.0.state.lock().unwrap().worker_wish(&id, generation);
             let Some(wish) = wish else {
                 break;
             };
@@ -649,8 +722,9 @@ impl HardwareService {
                 let mut state = self.0.state.lock().unwrap();
                 // Late responses for an obsolete binding or run state are discarded;
                 // endpoint-only discovery changes do not invalidate a verified result.
+                // A removed or replaced entry ends this worker's control too.
                 if !state
-                    .wish(&id)
+                    .worker_wish(&id, generation)
                     .is_some_and(|latest| latest.same_stream(&wish))
                 {
                     continue;
@@ -898,6 +972,95 @@ mod tests {
         });
         state.output.running = true;
         assert_eq!(state.wish(&id).unwrap().light_id, Some(logical_id));
+    }
+
+    #[test]
+    fn only_unbound_idle_devices_are_pruned_after_grace() {
+        let config: Configuration =
+            serde_json::from_str(include_str!("../../../tests/fixtures/configuration.json"))
+                .unwrap();
+        let LightOutput::Esp32 { device_id } = &config.rooms[0].lights.last().unwrap().output
+        else {
+            panic!("physical fixture")
+        };
+        let bound = device_id.clone();
+        let (idle, advertised, online) = (
+            "esp32-020000a1b2c3",
+            "esp32-020000112233",
+            "esp32-020000445566",
+        );
+        let mut state = State {
+            config,
+            ..State::default()
+        };
+        for id in [bound.as_str(), idle, advertised] {
+            state.devices.insert(id.into(), Device::default());
+        }
+        state.devices.insert(online.into(), online_device());
+        state
+            .devices
+            .get_mut(advertised)
+            .unwrap()
+            .advertisements
+            .insert(
+                "light._iotensity._tcp.local.".into(),
+                vec!["192.168.1.40:80".parse().unwrap()],
+            );
+        let now = Instant::now();
+        state.prune_devices(now);
+        state.prune_devices(now + DEVICE_GRACE - Duration::from_millis(1));
+        assert_eq!(state.devices.len(), 4);
+        // Seeing a light again restarts its grace period.
+        state.devices.get_mut(idle).unwrap().connection.online = true;
+        state.prune_devices(now + DEVICE_GRACE);
+        state.devices.get_mut(idle).unwrap().connection.online = false;
+        state.prune_devices(now + DEVICE_GRACE);
+        state.prune_devices(now + DEVICE_GRACE * 2 - Duration::from_millis(1));
+        assert!(state.devices.contains_key(idle));
+        state.prune_devices(now + DEVICE_GRACE * 2);
+        assert!(!state.devices.contains_key(idle));
+        assert!(state.devices.contains_key(advertised));
+        assert!(state.devices.contains_key(online));
+        // A saved binding is never forgotten, however long it stays offline.
+        state.prune_devices(now + DEVICE_GRACE * 100);
+        assert!(state.devices.contains_key(&bound));
+        state.config.rooms.clear();
+        state.prune_devices(now + DEVICE_GRACE * 100);
+        state.prune_devices(now + DEVICE_GRACE * 101);
+        assert!(!state.devices.contains_key(&bound));
+        assert_eq!(state.devices.len(), 2);
+    }
+
+    #[test]
+    fn replaced_device_entry_ends_old_worker_and_failed_start_backs_off() {
+        let id = "esp32-020000a1b2c3";
+        let mut state = State::default();
+        state.devices.insert(id.into(), online_device());
+        let now = Instant::now();
+        let first = state.claim_workers(now);
+        assert_eq!(first.len(), 1);
+        let old = first[0].1;
+        assert!(state.claim_workers(now).is_empty());
+        assert!(state.worker_wish(id, old).is_some());
+        // Evicted and rediscovered before the old worker noticed.
+        state.devices.remove(id);
+        assert!(state.worker_wish(id, old).is_none());
+        state.devices.insert(id.into(), Device::default());
+        let new = state.claim_workers(now)[0].1;
+        assert_ne!(new, old);
+        assert!(state.worker_wish(id, old).is_none());
+        assert!(state.worker_wish(id, new).is_some());
+        // A stale worker cannot release the current one.
+        state.worker_failed(id, old, "stale".into(), now);
+        assert_eq!(state.devices[id].worker, Some(new));
+        state.worker_failed(id, new, "no client".into(), now);
+        assert_eq!(state.snapshot().devices[0].message, "no client");
+        assert!(state
+            .claim_workers(now + WORKER_RETRY - Duration::from_millis(1))
+            .is_empty());
+        let retry = state.claim_workers(now + WORKER_RETRY);
+        assert_eq!(retry.len(), 1);
+        assert!(retry[0].1 > new);
     }
 
     fn preview_request(id: &str, x: f64) -> preview::PreviewRequest {
