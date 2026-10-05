@@ -1,9 +1,9 @@
 use super::protocol::{hex, parse_token, token, Session, VERSION};
 use reqwest::blocking::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::{io::Read, net::SocketAddrV4, time::Duration};
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
     pub device_id: String,
@@ -126,7 +126,6 @@ impl Control for HttpControl {
 pub struct Wish {
     pub epoch: u64,
     pub light_id: Option<String>,
-    pub running: bool,
     pub endpoints: Vec<SocketAddrV4>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -245,7 +244,7 @@ impl Connection {
     ) -> Result<Option<Target>, String> {
         let status = control.status(endpoint)?;
         status.verify(&self.id)?;
-        let Some(light_id) = wish.light_id.as_ref().filter(|_| wish.running) else {
+        let Some(light_id) = wish.light_id.as_ref() else {
             return Ok(None);
         };
         if let Some(session) = self.session {

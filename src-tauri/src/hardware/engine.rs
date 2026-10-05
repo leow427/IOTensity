@@ -1,18 +1,14 @@
 use crate::config::{Configuration, Intensity};
-use serde::Serialize;
 use std::collections::HashMap;
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Color {
     pub id: String,
     pub rgb: [u8; 3],
 }
-#[derive(Clone, Debug, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Default)]
 pub struct OutputSnapshot {
-    pub sequence: u64,
     pub running: bool,
-    pub elapsed: f64,
     pub colors: Vec<Color>,
 }
 #[derive(Default)]
@@ -68,9 +64,7 @@ impl Simulation {
         self.colors
             .retain(|id, _| colors.iter().any(|c| c.id == *id));
         OutputSnapshot {
-            sequence: 0,
             running: true,
-            elapsed: self.elapsed,
             colors,
         }
     }

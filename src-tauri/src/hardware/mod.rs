@@ -55,7 +55,6 @@ struct State {
     config: Configuration,
     output: OutputSnapshot,
     epoch: u64,
-    reduced_motion: bool,
     devices: BTreeMap<String, Device>,
     discovery_error: Option<String>,
     output_error: Option<String>,
@@ -173,7 +172,6 @@ impl State {
                 .then(|| self.color(id))
                 .flatten()
                 .map(|(light_id, _)| light_id),
-            running: self.output_available && self.color(id).is_some(),
             endpoints,
         })
     }
@@ -275,9 +273,6 @@ impl HardwareService {
         }
         state.prune_targets();
     }
-    pub fn snapshot(&self) -> OutputSnapshot {
-        self.0.state.lock().unwrap().output.clone()
-    }
     pub fn devices(&self) -> DevicesSnapshot {
         self.0.state.lock().unwrap().snapshot()
     }
@@ -294,18 +289,13 @@ impl HardwareService {
             .unwrap()
             .set_preview(request, Instant::now())
     }
-    pub fn set_reduced_motion(&self, reduced_motion: bool) {
-        self.0.state.lock().unwrap().reduced_motion = reduced_motion;
-    }
-    fn set_running(&self, running: bool, reduced_motion: bool) -> OutputSnapshot {
+    fn set_running(&self, running: bool) -> OutputSnapshot {
         let mut state = self.0.state.lock().unwrap();
         let running = running && state.config.rooms.iter().any(|r| !r.lights.is_empty());
         if state.output.running != running {
             state.epoch += 1;
         }
-        state.reduced_motion = reduced_motion;
         state.output.running = running;
-        state.output.sequence += 1;
         if !running {
             state.preview = None;
             for device in state.devices.values_mut() {
@@ -335,7 +325,7 @@ impl HardwareService {
             .map_err(|_| "Identify timed out. Try again.".to_string())?
     }
     pub fn shutdown(&self) {
-        self.set_running(false, false);
+        self.set_running(false);
         self.0.shutdown.store(true, Ordering::Release);
     }
     pub fn is_shutdown(&self) -> bool {
@@ -643,7 +633,7 @@ mod tests {
         state.devices.insert(id.clone(), device);
         let before = state.devices[&id].connection.clone();
         let wish = state.wish(&id).unwrap();
-        assert!(wish.running);
+        assert!(wish.light_id.is_some());
         state.reset_discovery();
         assert_eq!(state.devices[&id].connection, before);
         assert_eq!(state.wish(&id).unwrap(), wish);
@@ -676,7 +666,6 @@ mod tests {
             session: [7; 16],
         });
         state.output_available = false;
-        assert!(!state.wish(id).unwrap().running);
         assert!(state.wish(id).unwrap().light_id.is_none());
         state.output_error = Some("UDP output unavailable: address unavailable".into());
         state.discovery_error = Some("Discovery unavailable".into());
@@ -691,7 +680,7 @@ mod tests {
             .contains("UDP output unavailable"));
         state.output_error = None;
         state.output_available = true;
-        assert!(state.wish(id).unwrap().running);
+        assert!(state.wish(id).unwrap().light_id.is_some());
         assert!(state.snapshot().devices[0].streaming);
         assert_eq!(state.snapshot().devices[0].message, "Position preview");
     }
@@ -815,8 +804,8 @@ mod tests {
             .set_preview(Some(preview_request(id, -3.0)), now)
             .unwrap();
         let wish = state.wish(id).unwrap();
-        assert!(wish.running);
-        assert!(!state.wish(other).unwrap().running);
+        assert!(wish.light_id.is_some());
+        assert!(state.wish(other).unwrap().light_id.is_none());
         assert_eq!(state.color(id).unwrap().1, [64, 232, 135]);
         state
             .set_preview(Some(preview_request(id, 3.0)), now + Duration::from_secs(1))
@@ -824,9 +813,9 @@ mod tests {
         assert_eq!(state.wish(id).unwrap(), wish); // No session change for every mouse movement.
         assert_eq!(state.color(id).unwrap().1, [255, 89, 31]);
         state.expire(now + preview::PREVIEW_DURATION);
-        assert!(state.wish(id).unwrap().running); // Last edit renewed the lease.
+        assert!(state.wish(id).unwrap().light_id.is_some()); // Last edit renewed the lease.
         state.expire(now + Duration::from_secs(3));
-        assert!(!state.wish(id).unwrap().running);
+        assert!(state.wish(id).unwrap().light_id.is_none());
         assert_ne!(state.wish(id).unwrap(), wish); // An in-flight start must be discarded.
         assert!(state.color(id).is_none());
         assert_eq!(state.config, saved);

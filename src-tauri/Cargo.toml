@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Local ESP32 lighting and screen sync"
 authors = ["IOTensity"]
 edition = "2021"
+rust-version = "1.89"
 
 [lib]
 name = "iotensity_lib"
