@@ -3,7 +3,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chooseIdentity, isMacBundle, parseIdentities } from './signing.js';
+import {
+  chooseIdentity,
+  isMacBundle,
+  parseIdentities,
+  tauriSubcommand,
+} from './signing.js';
 import {
   appInstallation,
   assertNotRunning,
@@ -53,7 +58,7 @@ try {
   }
   if (
     process.platform === 'darwin' &&
-    (args[0] === 'dev' || args.includes('--debug'))
+    (tauriSubcommand(args) === 'dev' || args.includes('--debug'))
   ) {
     // Tauri dev runs an unbundled executable. Its permissions and configuration
     // must never replace those belonging to the signed release app.
