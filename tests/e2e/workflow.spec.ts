@@ -290,7 +290,7 @@ test('browser preview: Reset view is exact after orbiting into a limit', async (
     await page.mouse.up();
     // A camera clamped at a limit looks settled while damping momentum is
     // still draining; allow the two seconds it takes.
-    await page.waitForTimeout(2_500);
+    await page.waitForTimeout(3_000);
     return settled(canvas);
   };
   const reset = async () => {
