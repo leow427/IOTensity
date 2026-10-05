@@ -33,17 +33,13 @@ function CoordinateControl({
   disabled: boolean;
 }) {
   // The typed text stays local while editing so partial entries such as "0",
-  // "-" or "" are not clamped mid-keystroke. In-range numbers update the
-  // draft live; blur and Enter commit through the store's shared clamp.
+  // "-" or "" are not clamped mid-keystroke. Every number still updates the
+  // draft through the store's shared clamp, so dirty state and saves match
+  // what is typed; blur and Enter then show the clamped value.
   const [text, setText] = useState<string | null>(null);
   if (disabled && text !== null) setText(null);
   const [min, max] = BOUNDS[axis];
-  const commit = () => {
-    if (text === null) return;
-    const parsed = text.trim() === '' ? Number.NaN : Number(text);
-    if (Number.isFinite(parsed)) onChange(parsed);
-    setText(null);
-  };
+  const endEdit = () => setText(null);
   return (
     <div className="coordinate-control">
       <div className="coordinate-heading">
@@ -63,17 +59,12 @@ function CoordinateControl({
             onChange={(event) => {
               const next = event.target.valueAsNumber;
               setText(event.target.value);
-              if (
-                event.target.value !== '' &&
-                Number.isFinite(next) &&
-                next >= min &&
-                next <= max
-              )
+              if (event.target.value !== '' && Number.isFinite(next))
                 onChange(next);
             }}
-            onBlur={commit}
+            onBlur={endEdit}
             onKeyDown={(event) => {
-              if (event.key === 'Enter') commit();
+              if (event.key === 'Enter') endEdit();
             }}
           />
           <span>m</span>

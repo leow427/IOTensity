@@ -211,6 +211,29 @@ test('coordinate inputs accept keystroke typing and clamp arrow steps', async ({
   await expect(height).toHaveValue('3');
 });
 
+test('Save shortcut stores coordinate text that is still being typed, clamped', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Your Rooms' }).click();
+  await page.getByRole('button', { name: 'Add virtual light' }).click();
+  const save = page.getByRole('button', { name: /Save Room/ });
+  await save.click();
+  await expect(save).toBeDisabled();
+  const x = page.getByLabel('Left / right coordinate', { exact: true });
+  await x.selectText();
+  await x.pressSequentially('5');
+  await expect(save).toBeEnabled();
+  await expect(page.getByRole('status')).toContainText('UNSAVED');
+  await x.press('ControlOrMeta+s');
+  await expect(page.getByRole('status')).toHaveText('✓ PREVIEW UPDATED');
+  await expect(x).toHaveValue('3');
+  await x.press('Tab');
+  await expect(x).toHaveValue('3');
+  await expect(save).toBeDisabled();
+  await expect(page.getByRole('status')).not.toContainText('UNSAVED');
+});
+
 test('browser preview: resizing keeps the orbited room view until Reset view', async ({
   page,
 }) => {

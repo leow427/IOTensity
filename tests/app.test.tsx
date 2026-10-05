@@ -1,4 +1,11 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/App';
@@ -212,7 +219,7 @@ describe('room editing UI', () => {
     await user.keyboard('{Escape}');
     expect(store.getSnapshot().selectedLightId).toBeNull();
   });
-  it('lets coordinates be typed through partial out-of-range values and clamps on commit', async () => {
+  it('lets coordinates be typed through partial out-of-range values while the draft holds them clamped', async () => {
     const { user, store } = await setup();
     await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
     await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
@@ -225,9 +232,10 @@ describe('room editing UI', () => {
     const height = screen.getByLabelText('Height coordinate');
     await user.clear(height);
     await user.type(height, '0');
-    // "0" is below the floor: kept as typed, not clamped to 0.15 mid-entry.
+    // "0" is below the floor: kept as typed, not clamped to 0.15 mid-entry,
+    // while the draft already holds the clamped value Save would store.
     expect(height).toHaveValue(0);
-    expect(position().y).toBe(before.y);
+    expect(position().y).toBe(0.15);
     await user.type(height, '.5');
     expect(height).toHaveValue(0.5);
     expect(position()).toEqual({ ...before, y: 0.5 });
@@ -236,7 +244,8 @@ describe('room editing UI', () => {
 
     await user.clear(height);
     await user.type(height, '9');
-    expect(position().y).toBe(0.5);
+    expect(height).toHaveValue(9);
+    expect(position().y).toBe(3);
     await user.tab();
     expect(position()).toEqual({ ...before, y: 3 });
     expect(height).toHaveValue(3);
@@ -256,6 +265,33 @@ describe('room editing UI', () => {
     await user.type(x, '-1.25');
     expect(x).toHaveValue(-1.25);
     expect(position()).toEqual({ ...before, x: -1.25, y: 0.15 });
+  });
+  it('saves the clamped value of coordinate text that is still being typed', async () => {
+    const { user, store, persistence } = await setup();
+    await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
+    await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
+    await user.click(screen.getByRole('button', { name: /Save Room/ }));
+    const save = screen.getByRole('button', { name: /Save Room/ });
+    expect(save).toBeDisabled();
+    const x = screen.getByLabelText<HTMLInputElement>(
+      'Left / right coordinate',
+    );
+    // Replace the whole value in one keystroke, as typing over a selection does.
+    await user.type(x, '5', {
+      initialSelectionStart: 0,
+      initialSelectionEnd: x.value.length,
+    });
+    expect(x).toHaveFocus();
+    expect(save).toBeEnabled();
+    expect(screen.getByText('● UNSAVED CHANGES')).toBeInTheDocument();
+    await user.keyboard('{Control>}s{/Control}');
+    await waitFor(() => expect(store.getSnapshot().saveStatus).toBe('saved'));
+    expect(persistence.config.rooms[0].lights[0].position.x).toBe(3);
+    expect(x).toHaveValue(3);
+    await user.tab();
+    expect(x).toHaveValue(3);
+    expect(store.dirty).toBe(false);
+    expect(screen.queryByText('● UNSAVED CHANGES')).not.toBeInTheDocument();
   });
   it('uses an accessible navigation dialog and displays failed saves with the draft intact', async () => {
     const { user, persistence } = await setup();
