@@ -6,6 +6,7 @@ import {
 } from '@react-three/fiber';
 import {
   Component,
+  memo,
   useEffect,
   useMemo,
   useRef,
@@ -47,7 +48,8 @@ function Box({
   );
 }
 
-function Furniture() {
+// Static scenery: memoized so draft edits and drags do not re-render it.
+const Furniture = memo(function Furniture() {
   return (
     <group>
       <Box at={[0, -0.08, 1.55]} size={[6.45, 0.16, 5.2]} color="#566058" />
@@ -142,7 +144,7 @@ function Furniture() {
       </mesh>
     </group>
   );
-}
+});
 
 function DemandFrames({ output }: { output: SyncOutput }) {
   const invalidate = useThree((state) => state.invalidate);
@@ -162,8 +164,9 @@ function CameraControl({
   dragging: boolean;
   resetKey: number;
 }) {
-  const { camera, gl, size, invalidate } = useThree();
+  const { camera, gl, size, get, invalidate } = useThree();
   const controls = useMemo(() => new OrbitControls(camera), [camera]);
+  const fittedZoom = useRef(0);
   useEffect(() => {
     // Bind listeners in the effect so React's development remounts reconnect
     // cleanly, without side effects from a discarded render.
@@ -190,21 +193,37 @@ function CameraControl({
   useEffect(() => {
     controls.enabled = !dragging;
   }, [controls, dragging]);
+  // The full view resets only on mount and explicit Reset view.
   useEffect(() => {
+    const { width, height } = get().size;
     camera.position.set(7.4, 6.8, 9);
     if (camera instanceof OrthographicCamera) {
-      camera.zoom = Math.min(size.width / 9.5, size.height / 6.8);
+      camera.zoom = fittedZoom.current = Math.min(width / 9.5, height / 6.8);
       camera.updateProjectionMatrix();
     }
     controls.target.set(0, 1, 1.3);
     controls.update();
     invalidate();
-  }, [camera, controls, invalidate, resetKey, size.width, size.height]);
+  }, [camera, controls, get, invalidate, resetKey]);
+  // Resizing keeps the user's orbit and rescales zoom to the new viewport.
+  useEffect(() => {
+    if (!(camera instanceof OrthographicCamera)) return;
+    const fit = Math.min(size.width / 9.5, size.height / 6.8);
+    if (fit > 0 && fittedZoom.current > 0 && fit !== fittedZoom.current) {
+      camera.zoom *= fit / fittedZoom.current;
+      camera.updateProjectionMatrix();
+      invalidate();
+    }
+    if (fit > 0) fittedZoom.current = fit;
+  }, [camera, invalidate, size.width, size.height]);
   useFrame(() => controls.update());
   return null;
 }
 
-function Orb({
+// Props stay referentially stable across unrelated store updates (the store
+// keeps untouched lights and `setDragging` is a state setter), so only the
+// moved or reselected orb re-renders during a drag.
+const Orb = memo(function Orb({
   light,
   selected,
   mode,
@@ -224,7 +243,11 @@ function Orb({
   const selectionRing = useRef<Mesh>(null);
   const material = useRef<MeshBasicMaterial>(null);
   const haloMaterial = useRef<MeshBasicMaterial>(null);
-  const { camera, gl, invalidate } = useThree();
+  // Narrow selectors: R3F republishes its size object whenever the Canvas
+  // re-renders, which would otherwise bypass the memo on every store update.
+  const camera = useThree((state) => state.camera);
+  const gl = useThree((state) => state.gl);
+  const invalidate = useThree((state) => state.invalidate);
   const drag = useRef<{
     plane: Plane;
     offset: Vector3;
@@ -315,8 +338,9 @@ function Orb({
 
   return (
     <group position={[p.x, 0, p.z]}>
-      <mesh position={[0, p.y / 2, 0]}>
-        <cylinderGeometry args={[0.008, 0.008, p.y, 6]} />
+      {/* A unit-height stem scaled to the orb, so moves never rebuild geometry. */}
+      <mesh position={[0, p.y / 2, 0]} scale={[1, p.y, 1]}>
+        <cylinderGeometry args={[0.008, 0.008, 1, 6]} />
         <meshBasicMaterial
           color={selected ? '#ecebe0' : '#a3b1a0'}
           transparent
@@ -370,7 +394,7 @@ function Orb({
       )}
     </group>
   );
-}
+});
 
 class SceneBoundary extends Component<
   { children: ReactNode },

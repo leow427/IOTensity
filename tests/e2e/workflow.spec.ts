@@ -167,3 +167,75 @@ test('coordinate inputs accept keystroke typing and clamp arrow steps', async ({
   await page.getByRole('tab', { name: 'Height' }).click();
   await expect(height).toHaveValue('3');
 });
+
+test('browser preview: resizing keeps the orbited room view until Reset view', async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Your Rooms' }).click();
+  await page.getByRole('button', { name: 'Add virtual light' }).click();
+  await page.getByRole('button', { name: 'Clear light selection' }).click();
+  const canvas = page.locator('canvas');
+  await expect(canvas).toBeVisible();
+  // Orbit damping keeps rendering briefly; wait for two identical frames.
+  const settled = async () => {
+    let previous = await canvas.screenshot();
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      await page.waitForTimeout(150);
+      const next = await canvas.screenshot();
+      if (next.equals(previous)) return next;
+      previous = next;
+    }
+    throw new Error('The room view did not settle.');
+  };
+  // Fraction of visibly changed pixels; overlaid buttons alone stay far below
+  // the threshold used for a changed camera.
+  const changed = (first: Buffer, second: Buffer) =>
+    page.evaluate(
+      async ([a, b]) => {
+        const pixels = async (data: string) => {
+          const bitmap = await createImageBitmap(
+            await (await fetch(`data:image/png;base64,${data}`)).blob(),
+          );
+          const context = new OffscreenCanvas(
+            bitmap.width,
+            bitmap.height,
+          ).getContext('2d')!;
+          context.drawImage(bitmap, 0, 0);
+          return context.getImageData(0, 0, bitmap.width, bitmap.height).data;
+        };
+        const [x, y] = await Promise.all([pixels(a), pixels(b)]);
+        let count = 0;
+        for (let index = 0; index < x.length; index += 4) {
+          const delta =
+            Math.abs(x[index] - y[index]) +
+            Math.abs(x[index + 1] - y[index + 1]) +
+            Math.abs(x[index + 2] - y[index + 2]);
+          if (delta > 24) count += 1;
+        }
+        return count / (x.length / 4);
+      },
+      [first.toString('base64'), second.toString('base64')],
+    );
+  const before = (await canvas.boundingBox())!;
+  const start = {
+    x: before.x + before.width * 0.82,
+    y: before.y + before.height * 0.68,
+  };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x + 90, start.y - 45, { steps: 10 });
+  await page.mouse.up();
+  await settled();
+  await page.setViewportSize({ width: 1120, height: 820 });
+  await expect
+    .poll(async () => (await canvas.boundingBox())!.width)
+    .not.toBe(before.width);
+  const resized = await settled();
+  await page.getByRole('button', { name: 'Reset room view' }).click();
+  const reset = await settled();
+  expect(await changed(resized, reset)).toBeGreaterThan(0.05);
+  expect(errors).toEqual([]);
+});
