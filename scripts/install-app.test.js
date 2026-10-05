@@ -14,7 +14,13 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { installBundle, shouldInstallApp } from './install-app.js';
+import {
+  installBundle,
+  shouldInstallApp,
+  verifyBundle,
+} from './install-app.js';
+
+const FINGERPRINT = '0123456789ABCDEF0123456789ABCDEF01234567';
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'iotensity-install-test-'));
@@ -31,6 +37,7 @@ function fixture(t) {
   return {
     source,
     destination,
+    fingerprint: FINGERPRINT,
     verify: () => {},
     checkRunning: () => {},
     copy: (from, to) => cpSync(from, to, { recursive: true }),
@@ -144,4 +151,84 @@ test('does not overwrite another install or follow a destination symlink', (t) =
   symlinkSync(options.source, options.destination, 'dir');
   assert.throws(() => installBundle(options), /not a link/);
   assert.equal(version(options.source), 'new');
+});
+
+test('requires the pinned signer for the build and staged copy', (t) => {
+  const options = fixture(t);
+  const calls = [];
+  installBundle({
+    ...options,
+    verify: (path, fingerprint) => calls.push([path, fingerprint]),
+  });
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[0], [options.source, FINGERPRINT]);
+  // A previously installed app may predate an explicit identity replacement.
+  assert.deepEqual(calls[1], [options.destination, undefined]);
+  assert.match(calls[2][0], /\.iotensity-install-.*IOTensity\.app$/);
+  assert.equal(calls[2][1], FINGERPRINT);
+  for (const fingerprint of [undefined, '', 'not-a-fingerprint']) {
+    assert.throws(
+      () => installBundle({ ...options, fingerprint }),
+      /fingerprint is missing or invalid/,
+    );
+  }
+  assert.equal(version(options.destination), 'new');
+});
+
+test('checks the code signature against the pinned leaf certificate', () => {
+  const calls = [];
+  const exec = (file, args) => {
+    calls.push([file, args]);
+    return file === '/usr/libexec/PlistBuddy' ? 'com.iotensity.desktop\n' : '';
+  };
+  verifyBundle('/build/IOTensity.app', FINGERPRINT, exec);
+  assert.deepEqual(calls.slice(1), [
+    [
+      '/usr/bin/codesign',
+      ['--verify', '--deep', '--strict', '/build/IOTensity.app'],
+    ],
+    [
+      '/usr/bin/codesign',
+      [
+        '--verify',
+        '--strict',
+        '--test-requirement',
+        `=certificate leaf = H"${FINGERPRINT}"`,
+        '/build/IOTensity.app',
+      ],
+    ],
+  ]);
+  calls.length = 0;
+  verifyBundle('/installed/IOTensity.app', undefined, exec);
+  assert.equal(calls.length, 2);
+  assert.throws(
+    () => verifyBundle('/build/IOTensity.app', 'abc', exec),
+    /fingerprint is missing or invalid/,
+  );
+});
+
+test('refuses ad-hoc or differently signed staged apps without replacing', (t) => {
+  const options = fixture(t);
+  // codesign exits non-zero when the leaf certificate does not match.
+  const exec = (file, args) => {
+    if (file === '/usr/libexec/PlistBuddy') return 'com.iotensity.desktop\n';
+    if (
+      args.includes('--test-requirement') &&
+      args.at(-1).includes('.iotensity-install-')
+    )
+      throw new Error('test-requirement: code failed to satisfy requirement');
+    return '';
+  };
+  assert.throws(
+    () =>
+      installBundle({
+        ...options,
+        verify: (path, fingerprint) => verifyBundle(path, fingerprint, exec),
+      }),
+    /not signed by the pinned macOS signing identity/,
+  );
+  assert.equal(version(options.destination), 'old');
+  assert.deepEqual(readdirSync(join(options.destination, '..')), [
+    'IOTensity.app',
+  ]);
 });

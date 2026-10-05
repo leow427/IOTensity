@@ -20,21 +20,47 @@ export function shouldInstallApp(platform, args, env = {}) {
   );
 }
 
-function bundleIdentity(path) {
-  return execFileSync(
+const FINGERPRINT = /^[A-F0-9]{40}$/;
+
+// `security find-identity` prints the certificate's SHA-1 hash, which is what
+// a `certificate leaf = H"..."` code requirement matches. Ad-hoc and other
+// identities' signatures fail it.
+export function signerRequirement(fingerprint) {
+  if (!FINGERPRINT.test(fingerprint ?? ''))
+    throw new Error(
+      'The pinned macOS signing fingerprint is missing or invalid; refusing to install an unverified app.',
+    );
+  return `=certificate leaf = H"${fingerprint}"`;
+}
+
+// Without a fingerprint only integrity is checked: an installed app signed by a
+// previously pinned identity may still be replaced by a correctly signed build.
+export function verifyBundle(path, fingerprint, exec = execFileSync) {
+  const identity = exec(
     '/usr/libexec/PlistBuddy',
     ['-c', 'Print :CFBundleIdentifier', join(path, 'Contents', 'Info.plist')],
     { encoding: 'utf8' },
   ).trim();
-}
-
-function verifyBundle(path) {
-  if (bundleIdentity(path) !== 'com.iotensity.desktop') {
+  if (identity !== 'com.iotensity.desktop') {
     throw new Error(`Refusing to replace an unrelated application: ${path}`);
   }
-  execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', path], {
+  exec('/usr/bin/codesign', ['--verify', '--deep', '--strict', path], {
     stdio: 'pipe',
   });
+  if (fingerprint === undefined) return;
+  const requirement = signerRequirement(fingerprint);
+  try {
+    exec(
+      '/usr/bin/codesign',
+      ['--verify', '--strict', '--test-requirement', requirement, path],
+      { stdio: 'pipe' },
+    );
+  } catch (error) {
+    throw new Error(
+      `The app is not signed by the pinned macOS signing identity: ${path}`,
+      { cause: error },
+    );
+  }
 }
 
 export function assertNotRunning(destination) {
@@ -59,11 +85,13 @@ export function assertNotRunning(destination) {
 export function installBundle({
   source,
   destination,
+  fingerprint,
   verify = verifyBundle,
   checkRunning = assertNotRunning,
   copy = (from, to) => execFileSync('/usr/bin/ditto', [from, to]),
   move = renameSync,
 }) {
+  signerRequirement(fingerprint);
   source = resolve(source);
   destination = resolve(destination);
   if (source === destination)
@@ -77,7 +105,7 @@ export function installBundle({
     );
   }
   checkRunning(destination);
-  verify(source);
+  verify(source, fingerprint);
   if (existsSync(destination)) verify(destination);
   const parent = dirname(destination);
   mkdirSync(parent, { recursive: true });
@@ -98,7 +126,7 @@ export function installBundle({
     const incoming = join(stage, 'IOTensity.app');
     const previous = join(stage, 'previous.app');
     copy(source, incoming);
-    verify(incoming);
+    verify(incoming, fingerprint);
     checkRunning(destination);
     const replaced = existsSync(destination);
     if (replaced) move(destination, previous);
