@@ -16,6 +16,7 @@ export interface SyncOutput {
   readonly available: boolean;
   connect(): Promise<void>;
   subscribe(listener: () => void): () => void;
+  subscribeColors(listener: () => void): () => void;
   getSnapshot(): SyncSnapshot;
   getColor(id: string): RGB | undefined;
   start(source: SyncSource, reducedMotion?: boolean): Promise<void>;
@@ -34,7 +35,8 @@ const nativeTransport: SyncTransport = {
 };
 
 // A passive cache of final native RGB8 values. No image processing, brightness,
-// smoothing or animation is duplicated here. Paint loops read without React updates.
+// smoothing or animation is duplicated here. Paint loops read without React updates;
+// demand-rendered views subscribe to color changes instead of polling every frame.
 export class NativeSyncOutput implements SyncOutput {
   private snapshot: SyncSnapshot = {
     sequence: -1,
@@ -45,6 +47,7 @@ export class NativeSyncOutput implements SyncOutput {
   };
   private colors = new Map<string, RGB>();
   private listeners = new Set<() => void>();
+  private colorListeners = new Set<() => void>();
   private unlisten?: UnlistenFn;
   private connecting?: Promise<void>;
   private disposed = false;
@@ -61,12 +64,27 @@ export class NativeSyncOutput implements SyncOutput {
       this.listeners.delete(listener);
     };
   };
+  subscribeColors = (listener: () => void) => {
+    this.colorListeners.add(listener);
+    return () => {
+      this.colorListeners.delete(listener);
+    };
+  };
   private receive = (next: SyncSnapshot) => {
     if (this.disposed || next.sequence <= this.snapshot.sequence) return;
     const changed =
       next.status !== this.snapshot.status ||
       next.source !== this.snapshot.source ||
       next.message !== this.snapshot.message;
+    // Static colors are repeated with fresh sequences; only real changes repaint.
+    const previous = this.snapshot.colors;
+    const colorsChanged =
+      next.colors.length !== previous.length ||
+      next.colors.some(
+        ({ id, rgb }, index) =>
+          id !== previous[index].id ||
+          rgb.some((channel, c) => channel !== previous[index].rgb[c]),
+      );
     this.snapshot = next;
     this.colors = new Map(
       next.colors.map(({ id, rgb }) => [
@@ -75,6 +93,7 @@ export class NativeSyncOutput implements SyncOutput {
       ]),
     );
     if (changed) this.listeners.forEach((listener) => listener());
+    if (colorsChanged) this.colorListeners.forEach((listener) => listener());
   };
   connect() {
     if (!this.available) return Promise.resolve();
@@ -130,5 +149,6 @@ export class NativeSyncOutput implements SyncOutput {
     this.disposed = true;
     this.unlisten?.();
     this.listeners.clear();
+    this.colorListeners.clear();
   }
 }

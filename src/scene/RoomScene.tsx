@@ -25,6 +25,8 @@ import { resolveColor } from '../domain/colors';
 import type { EditMode, Room, VirtualLight } from '../domain/model';
 import { useStore } from '../state/context';
 import type { AppStore } from '../state/store';
+import type { SyncOutput } from '../sync/output';
+import { useOutputInvalidation } from './invalidation';
 
 function Box({
   at,
@@ -142,6 +144,17 @@ function Furniture() {
   );
 }
 
+function DemandFrames({ output }: { output: SyncOutput }) {
+  const invalidate = useThree((state) => state.invalidate);
+  const width = useThree((state) => state.size.width);
+  const height = useThree((state) => state.size.height);
+  const dpr = useThree((state) => state.viewport.dpr);
+  useOutputInvalidation(output, invalidate);
+  // Resizing clears the drawing buffer without updating any scene object.
+  useEffect(() => invalidate(), [invalidate, width, height, dpr]);
+  return null;
+}
+
 function CameraControl({
   dragging,
   resetKey,
@@ -149,12 +162,16 @@ function CameraControl({
   dragging: boolean;
   resetKey: number;
 }) {
-  const { camera, gl, size } = useThree();
+  const { camera, gl, size, invalidate } = useThree();
   const controls = useMemo(() => new OrbitControls(camera), [camera]);
   useEffect(() => {
     // Bind listeners in the effect so React's development remounts reconnect
     // cleanly, without side effects from a discarded render.
     controls.connect(gl.domElement);
+    // Orbit, zoom and each damping step emit `change` from update(); a frame
+    // requested during useFrame keeps the demand loop alive until damping settles.
+    const change = () => invalidate();
+    controls.addEventListener('change', change);
     controls.target.set(0, 0.9, 1.15);
     controls.enablePan = false;
     controls.enableDamping = true;
@@ -165,8 +182,11 @@ function CameraControl({
     controls.maxAzimuthAngle = Math.PI / 2.5;
     controls.minZoom = 34;
     controls.maxZoom = 130;
-    return () => controls.dispose();
-  }, [controls, gl]);
+    return () => {
+      controls.removeEventListener('change', change);
+      controls.dispose();
+    };
+  }, [controls, gl, invalidate]);
   useEffect(() => {
     controls.enabled = !dragging;
   }, [controls, dragging]);
@@ -178,7 +198,8 @@ function CameraControl({
     }
     controls.target.set(0, 1, 1.3);
     controls.update();
-  }, [camera, controls, resetKey, size.width, size.height]);
+    invalidate();
+  }, [camera, controls, invalidate, resetKey, size.width, size.height]);
   useFrame(() => controls.update());
   return null;
 }
@@ -203,7 +224,7 @@ function Orb({
   const selectionRing = useRef<Mesh>(null);
   const material = useRef<MeshBasicMaterial>(null);
   const haloMaterial = useRef<MeshBasicMaterial>(null);
-  const { camera, gl } = useThree();
+  const { camera, gl, invalidate } = useThree();
   const drag = useRef<{
     plane: Plane;
     offset: Vector3;
@@ -229,6 +250,9 @@ function Orb({
     if (selectionRing.current)
       selectionRing.current.quaternion.copy(camera.quaternion);
   });
+  // Selection and edit mode change the calibration color without changing any
+  // object prop, so request the frame that repaints it.
+  useEffect(() => invalidate(), [invalidate, light, selected, editable, mode]);
   useEffect(
     () => () => {
       if (drag.current) setDragging(false);
@@ -387,6 +411,7 @@ export function RoomScene({
     <SceneBoundary>
       <Canvas
         role="img"
+        frameloop="demand"
         orthographic
         camera={{ position: [7.4, 6.8, 9], zoom: 64, near: 0.1, far: 80 }}
         dpr={[1, 1.7]}
@@ -419,6 +444,7 @@ export function RoomScene({
           />
         ))}
         <CameraControl dragging={dragging} resetKey={resetKey} />
+        <DemandFrames output={store.output} />
       </Canvas>
     </SceneBoundary>
   );
