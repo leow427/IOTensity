@@ -6,6 +6,19 @@ import { BrandMark, Icon } from './ui/Icons';
 import { RoomEditor } from './ui/RoomEditor';
 import { SyncPage } from './ui/SyncPage';
 
+// Escape belongs to open dialogs and editable controls first: a dialog's
+// cancel runs after this window keydown, so check for it while still open.
+function escapeDeselects(event: KeyboardEvent) {
+  if (event.defaultPrevented || document.querySelector('dialog[open]'))
+    return false;
+  const target = event.target;
+  return !(
+    target instanceof HTMLElement &&
+    (target.isContentEditable ||
+      target.closest('input, textarea, select, dialog') !== null)
+  );
+}
+
 function UnsavedDialog() {
   const store = useStore();
   const state = useAppState();
@@ -80,7 +93,11 @@ export function App() {
         event.preventDefault();
         if (!store.getSnapshot().pending) void store.saveRoom();
       }
-      if (event.key === 'Escape' && !store.getSnapshot().pending)
+      if (
+        event.key === 'Escape' &&
+        !store.getSnapshot().pending &&
+        escapeDeselects(event)
+      )
         store.selectLight(null);
     };
     const beforeunload = (event: BeforeUnloadEvent) => {
