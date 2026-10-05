@@ -112,6 +112,21 @@ struct DisplayUpdate {
 
 #[cfg(any(target_os = "macos", test))]
 impl Runtime {
+    fn wants_display_frame(&self) -> bool {
+        self.snapshot.source == Source::Display
+            && matches!(self.snapshot.status, Status::Starting | Status::Running)
+    }
+
+    // Applies a poll that was decoded without the runtime lock. A Stop or
+    // shutdown that took the lock meanwhile wins and discards the stale frame;
+    // a source started meanwhile waits for its own first Complete frame.
+    fn apply_display_poll(&mut self, update: Option<DisplayUpdate>, now: Instant) -> Instant {
+        match update {
+            Some(update) if self.wants_display_frame() => self.update_display(update, now),
+            _ => now,
+        }
+    }
+
     fn update_display(&mut self, update: DisplayUpdate, now: Instant) -> Instant {
         let idle = update.frame_status == 1;
         let observed_at = if idle {
@@ -187,6 +202,20 @@ impl SyncService {
                 last = now;
                 #[allow(unused_mut)]
                 let mut observed_at = now;
+                // Decoding a full-resolution frame touches every pixel, so it
+                // runs without the runtime lock: Stop, start, snapshots, saves
+                // and shutdown never wait behind it.
+                #[cfg(target_os = "macos")]
+                let update = {
+                    let wanted = {
+                        let rt = inner.lock().unwrap();
+                        if rt.shutdown {
+                            break;
+                        }
+                        rt.wants_display_frame()
+                    };
+                    wanted.then(|| capture.get_or_insert_with(capture::Capture::start).poll())
+                };
                 let snapshot = {
                     let mut rt = inner.lock().unwrap();
                     if rt.shutdown {
@@ -199,9 +228,7 @@ impl SyncService {
                             } else {
                                 #[cfg(target_os = "macos")]
                                 {
-                                    let stream =
-                                        capture.get_or_insert_with(capture::Capture::start);
-                                    observed_at = rt.update_display(stream.poll(), now);
+                                    observed_at = rt.apply_display_poll(update, now);
                                     if rt.snapshot.status == Status::Error {
                                         capture = None;
                                     }
@@ -491,6 +518,35 @@ mod tests {
             changed
         );
         assert_eq!(rt.snapshot.status, Status::Error);
+    }
+
+    #[test]
+    fn frames_decoded_outside_the_lock_cannot_override_a_later_stop() {
+        let service = configured(Source::Display);
+        let now = Instant::now();
+        assert!(service.inner.lock().unwrap().wants_display_frame());
+        // The output thread decodes here without the runtime lock, so Stop wins it.
+        let decoded = display_update(0, 0, true);
+        assert_eq!(service.stop().status, Status::Stopping);
+        let mut rt = service.inner.lock().unwrap();
+        assert!(!rt.wants_display_frame());
+        assert_eq!(rt.apply_display_poll(Some(decoded), now), now);
+        assert_eq!(rt.snapshot.status, Status::Stopping);
+        assert!(rt.processor.image.is_none());
+        rt.snapshot.status = Status::Stopped;
+        drop(rt);
+        // A source started after the unlocked decision waits for its own poll.
+        assert_eq!(
+            service.start(Source::Display).unwrap().status,
+            Status::Starting
+        );
+        let mut rt = service.inner.lock().unwrap();
+        assert_eq!(rt.apply_display_poll(None, now), now);
+        assert_eq!(rt.snapshot.status, Status::Starting);
+        assert!(rt.processor.image.is_none());
+        rt.apply_display_poll(Some(display_update(0, 0, true)), now);
+        assert_eq!(rt.snapshot.status, Status::Running);
+        assert!(rt.processor.image.is_some());
     }
 
     #[test]
