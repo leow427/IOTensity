@@ -1,4 +1,5 @@
 use crate::config::{Configuration, Intensity};
+use crate::sync::processing::{linear_to_srgb, srgb_to_linear};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -29,7 +30,8 @@ pub fn target(seconds: f64, id: &str) -> [f64; 3] {
 }
 impl Simulation {
     /// Injected elapsed time; smoothing belongs only to this synthetic source.
-    /// Hardware consumes the final RGB8 output without any further processing.
+    /// The smoothed sRGB color is scaled once in linear light, like Display/Test,
+    /// and hardware consumes the final RGB8 output without any further processing.
     pub fn tick(
         &mut self,
         dt: f64,
@@ -45,6 +47,7 @@ impl Simulation {
             Intensity::Punch => 0.08,
         };
         let alpha = 1.0 - (-dt / response.max(if reduced_motion { 2.5 } else { 0.0 })).exp();
+        let brightness = f32::from(config.preferences.brightness) / 100.0;
         let mut colors = Vec::new();
         for light in config.rooms.iter().flat_map(|r| &r.lights) {
             let color = self
@@ -61,7 +64,7 @@ impl Simulation {
             colors.push(Color {
                 id: light.id.clone(),
                 rgb: color.map(|c| {
-                    (c * f64::from(config.preferences.brightness) / 100.0 * 255.0).round() as u8
+                    linear_to_srgb(srgb_to_linear((c * 255.0).round() as u8) * brightness)
                 }),
             });
         }
@@ -80,17 +83,52 @@ impl Simulation {
 mod tests {
     use super::*;
     #[test]
-    fn deterministic_source_applies_brightness_once() {
+    fn deterministic_source_applies_brightness_once_in_linear_light() {
+        use crate::sync::processing::{AnalysisImage, Processor};
         let mut config: Configuration =
             serde_json::from_str(include_str!("../../../tests/fixtures/configuration.json"))
                 .unwrap();
+        let lights: Vec<_> = config.rooms.iter().flat_map(|r| r.lights.clone()).collect();
         config.preferences.brightness = 100;
         let full = Simulation::default().tick(0.033, &config, false);
+        // Full brightness is the unscaled smoothed sRGB color.
+        let mut reference = Simulation::default();
+        reference.tick(0.033, &config, false);
+        for (light, output) in lights.iter().zip(full.colors.iter()) {
+            assert_eq!(
+                output.rgb,
+                reference.colors[&light.id].map(|c| (c * 255.0).round() as u8)
+            );
+        }
+        for brightness in [50, 25, 0] {
+            config.preferences.brightness = brightness;
+            let scaled = Simulation::default().tick(0.033, &config, false);
+            for (light, (base, output)) in lights.iter().zip(full.colors.iter().zip(&scaled.colors))
+            {
+                // A uniform media frame of the same base color takes the Display/Test path.
+                let processor = Processor {
+                    image: Some(
+                        AnalysisImage::from_bgra(
+                            &[base.rgb[2], base.rgb[1], base.rgb[0], 255].repeat(4),
+                            2,
+                            2,
+                            8,
+                        )
+                        .unwrap(),
+                    ),
+                };
+                let media = processor.frame(std::slice::from_ref(light), brightness);
+                assert_eq!(output.rgb, media[0].rgb);
+            }
+        }
+        // 50% brightness is half the linear light, not half the encoded value.
         config.preferences.brightness = 50;
         let half = Simulation::default().tick(0.033, &config, false);
         for (a, b) in full.colors.iter().zip(half.colors.iter()) {
             for i in 0..3 {
-                assert!((f64::from(a.rgb[i]) * 0.5 - f64::from(b.rgb[i])).abs() <= 1.0);
+                let expected = linear_to_srgb(srgb_to_linear(a.rgb[i]) * 0.5);
+                assert_eq!(b.rgb[i], expected);
+                assert!(a.rgb[i] < 64 || b.rgb[i] > a.rgb[i] / 2 + 1);
             }
         }
         config.preferences.brightness = 0;
