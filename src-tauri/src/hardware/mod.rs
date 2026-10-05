@@ -23,6 +23,10 @@ use std::{
 
 pub const SERVICE: &str = "_iotensity._tcp.local.";
 pub const FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 30 + 1);
+/// Shared 250 ms stall bound. Hardware applies it to publish ticks; sync applies
+/// it to capture progress. Each is measured where it is observed, so a source
+/// gap that sync still accepts can never expire output between ticks.
+pub const STALL_TIMEOUT: Duration = Duration::from_millis(250);
 type IdentifyReply = mpsc::SyncSender<Result<(), String>>;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,7 +64,7 @@ struct State {
     discovery_error: Option<String>,
     output_error: Option<String>,
     output_available: bool,
-    last_frame: Option<Instant>,
+    last_publish: Option<Instant>,
     preview: Option<preview::Preview>,
 }
 impl State {
@@ -104,8 +108,8 @@ impl State {
         }
         if self.output.running
             && self
-                .last_frame
-                .is_none_or(|last| now.duration_since(last) > Duration::from_millis(250))
+                .last_publish
+                .is_none_or(|last| now.duration_since(last) >= STALL_TIMEOUT)
         {
             self.output.running = false;
             self.epoch += 1;
@@ -345,18 +349,20 @@ impl HardwareService {
     pub fn publish(&self, colors: &[crate::sync::processing::LightColor], running: bool) {
         self.publish_at(colors, running, Instant::now());
     }
+    /// `published_at` is the publisher's tick time, not capture age: source
+    /// progress is judged by sync, and this watchdog bounds publisher stalls.
     pub fn publish_at(
         &self,
         colors: &[crate::sync::processing::LightColor],
         running: bool,
-        observed_at: Instant,
+        published_at: Instant,
     ) {
         let mut state = self.0.state.lock().unwrap();
         if state.output.running != running {
             state.epoch += 1;
         }
         state.output.running = running;
-        state.last_frame = Some(observed_at);
+        state.last_publish = Some(published_at);
         state.output.colors = colors
             .iter()
             .map(|c| engine::Color {
@@ -599,6 +605,25 @@ impl HardwareService {
     }
 }
 
+#[cfg(test)]
+impl HardwareService {
+    /// A service without output, discovery or control threads.
+    pub(crate) fn detached() -> Self {
+        Self(Arc::new(Inner {
+            state: Mutex::new(State::default()),
+            shutdown: AtomicBool::new(false),
+            retry_discovery: AtomicBool::new(false),
+            client_id: "test".into(),
+        }))
+    }
+    /// Runs the output thread's watchdog at `now`; returns `(running, epoch)`.
+    pub(crate) fn expire_at(&self, now: Instant) -> (bool, u64) {
+        let mut state = self.0.state.lock().unwrap();
+        state.expire(now);
+        (state.output.running, state.epoch)
+    }
+}
+
 /// This milestone supports IPv4 private/link-local LANs. No URLs come from React.
 pub fn lan_address(ip: Ipv4Addr) -> bool {
     (ip.is_private() || ip.is_link_local()) && !ip.is_broadcast() && !ip.is_unspecified()
@@ -697,13 +722,8 @@ mod tests {
     }
 
     #[test]
-    fn cached_publication_keeps_original_source_age_for_watchdog() {
-        let service = HardwareService(Arc::new(Inner {
-            state: Mutex::new(State::default()),
-            shutdown: AtomicBool::new(false),
-            retry_discovery: AtomicBool::new(false),
-            client_id: "test".into(),
-        }));
+    fn stalled_publisher_stops_output_and_discards_targets() {
+        let service = HardwareService::detached();
         let config: Configuration =
             serde_json::from_str(include_str!("../../../tests/fixtures/configuration.json"))
                 .unwrap();
@@ -720,7 +740,6 @@ mod tests {
         }];
         let observed = Instant::now();
         service.publish_at(&colors, true, observed);
-        service.publish_at(&colors, true, observed); // Cached repaint cannot renew source age.
         let mut state = service.0.state.lock().unwrap();
         let target = control::Target {
             light_id: logical_id,
@@ -728,9 +747,14 @@ mod tests {
             session: [7; 16],
         };
         state.devices.get_mut(&id).unwrap().connection.target = Some(target.clone());
-        assert_eq!(state.last_frame, Some(observed));
-        state.expire(observed + Duration::from_millis(251));
+        assert_eq!(state.last_publish, Some(observed));
+        let epoch = state.epoch;
+        state.expire(observed + STALL_TIMEOUT - Duration::from_millis(1));
+        assert!(state.output.running);
+        assert!(state.devices[&id].connection.target.is_some());
+        state.expire(observed + STALL_TIMEOUT);
         assert!(!state.output.running);
+        assert_eq!(state.epoch, epoch + 1);
         assert!(state.devices[&id].connection.target.is_none());
         drop(state);
         service.publish_at(&colors, true, observed);
@@ -889,7 +913,7 @@ mod tests {
         let now = Instant::now();
         let mut state = State {
             config,
-            last_frame: Some(now),
+            last_publish: Some(now),
             ..Default::default()
         };
         state.devices.insert(id.clone(), online_device());
@@ -906,16 +930,16 @@ mod tests {
         assert_eq!(state.wish(&id).unwrap(), before);
         assert_eq!(state.color(&id).unwrap().1, [64, 232, 135]);
         let end = now + preview::PREVIEW_DURATION;
-        state.last_frame = Some(end);
+        state.last_publish = Some(end);
         state.expire(end);
         assert_eq!(state.wish(&id).unwrap(), before);
         assert_eq!(state.color(&id).unwrap().1, [10, 20, 30]);
         assert_eq!(state.config, saved);
-        // A stale sync source still stops, including when a placement preview exists.
+        // A stalled sync publisher still stops, including when a placement preview exists.
         state
             .set_preview(Some(preview_request(&id, 0.0)), end)
             .unwrap();
-        state.expire(end + Duration::from_millis(251));
+        state.expire(end + STALL_TIMEOUT);
         assert!(!state.output.running);
         state.expire(end + preview::PREVIEW_DURATION);
         assert!(state.color(&id).is_none());
