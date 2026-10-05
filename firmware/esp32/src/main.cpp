@@ -14,6 +14,7 @@ using namespace iotensity;
 constexpr uint16_t kHttpPort = 80;
 constexpr uint16_t kUdpPort = 49600;
 constexpr uint32_t kPwmHz = 20000;
+constexpr uint32_t kServiceRetryMs = 5000;
 const uint8_t kPins[] = {IOT_RED_PIN, IOT_GREEN_PIN, IOT_BLUE_PIN};
 WebServer http(kHttpPort);
 Preferences preferences;
@@ -260,19 +261,27 @@ void loop() {
   const bool wifi = WiFi.status() == WL_CONNECTED;
   static IPAddress advertised_ip;
   static uint32_t last_retry = 0;
-  if (wifi && (!connected || WiFi.localIP() != advertised_ip)) {
-    if (connected) { http.stop(); MDNS.end(); Guard guard; stream.stop(); }
-    connected = true; advertised_ip = WiFi.localIP();
+  static uint32_t service_failed_at = 0;
+  static bool service_failed = false;
+  if (wifi && (!connected || WiFi.localIP() != advertised_ip) &&
+      (!service_failed || uint32_t(millis() - service_failed_at) >= kServiceRetryMs)) {
+    if (connected) { connected = false; http.stop(); MDNS.end(); Guard guard; stream.stop(); }
+    advertised_ip = WiFi.localIP();
     http.begin();
     if (MDNS.begin(hostname.c_str())) {
       MDNS.addService("iotensity", "tcp", kHttpPort);
       MDNS.addServiceTxt("iotensity", "tcp", "id", device_id);
       MDNS.addServiceTxt("iotensity", "tcp", "model", "esp32-rgb");
       MDNS.addServiceTxt("iotensity", "tcp", "pv", "1");
-    } else { connected = false; http.stop(); }
-    Serial.println("Local network services ready.");
+      connected = true; service_failed = false;
+      Serial.println("Local network services ready.");
+    } else {
+      http.stop(); MDNS.end(); service_failed = true; service_failed_at = millis();
+      Serial.printf("mDNS start failed; retrying in %u ms.\n", unsigned(kServiceRetryMs));
+    }
   }
   if (!wifi && connected) { connected = false; http.stop(); MDNS.end(); Guard guard; stream.stop(); }
+  if (!wifi) service_failed = false; // A fresh Wi-Fi connection retries services immediately.
   if (!wifi && uint32_t(millis() - last_retry) >= 5000 && configured_ssid.length()) {
     last_retry = millis(); WiFi.reconnect();
   }
