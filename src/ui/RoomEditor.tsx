@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   BOUNDS,
   ICON_KINDS,
@@ -111,6 +111,18 @@ export function RoomEditor() {
   const [resetKey, setResetKey] = useState(0);
   const room = state.draft!;
   const light = room.lights.find((item) => item.id === state.selectedLightId);
+  // Stable per-kind arrays keep the card paint loops running across unrelated renders.
+  const groups = useMemo(
+    () =>
+      (['virtual', 'esp32'] as const).map(
+        (kind) =>
+          [
+            kind,
+            room.lights.filter((item) => item.output.kind === kind),
+          ] as const,
+      ),
+    [room.lights],
+  );
   const saving = state.saveStatus === 'saving';
   const nameMissing = !!light && !light.name.trim();
   return (
@@ -226,11 +238,8 @@ export function RoomEditor() {
                 </span>
               </span>
             </div>
-            {(['virtual', 'esp32'] as const).map((kind) => {
-              const lights = room.lights.filter(
-                (light) => light.output.kind === kind,
-              );
-              return lights.length ? (
+            {groups.map(([kind, lights]) =>
+              lights.length ? (
                 <div key={kind} className="output-group">
                   <h3 className="eyebrow mono">
                     {kind === 'virtual' ? 'VIRTUAL PREVIEW' : 'PHYSICAL LIGHTS'}
@@ -242,8 +251,8 @@ export function RoomEditor() {
                     editable
                   />
                 </div>
-              ) : null;
-            })}
+              ) : null,
+            )}
             {!room.lights.length && (
               <button className="empty-card" onClick={() => store.addLight()}>
                 <Icon name="plus" size={24} />
