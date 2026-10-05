@@ -3,7 +3,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chooseIdentity, isMacBundle, parseIdentities } from './signing.js';
+import {
+  chooseIdentity,
+  isMacBundle,
+  parseIdentities,
+  requestedIdentity,
+} from './signing.js';
 import {
   appInstallation,
   assertNotRunning,
@@ -34,7 +39,7 @@ try {
     );
     const identity = chooseIdentity(
       identities,
-      env.APPLE_SIGNING_IDENTITY ?? pin?.fingerprint,
+      requestedIdentity(env.APPLE_SIGNING_IDENTITY, pin?.fingerprint),
     );
     // Pin once, so adding another certificate cannot silently change app identity.
     // An explicit environment override deliberately selects and pins a replacement.

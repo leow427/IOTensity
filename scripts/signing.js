@@ -10,6 +10,12 @@ export function parseIdentities(output) {
     );
 }
 
+// An empty or blank override is treated as unset, so it cannot bypass the pin.
+export function requestedIdentity(override, pinnedFingerprint) {
+  const explicit = override?.trim();
+  return explicit || pinnedFingerprint;
+}
+
 export function chooseIdentity(identities, requested) {
   if (requested) {
     const matches = identities.filter(
