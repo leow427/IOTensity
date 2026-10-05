@@ -22,6 +22,10 @@ SemaphoreHandle_t stream_lock;
 iotensity::Stream stream;
 String device_id, hostname, configured_ssid, configured_password;
 bool connected = false;
+// Forced Wi-Fi reconnects start after a slow association plus several lwIP DHCP retries
+// (2/4/8 s apart) and double up to the cap; a successful connection resets the delay.
+constexpr uint32_t kWifiRetryInitialMs = 15000;
+constexpr uint32_t kWifiRetryMaxMs = 60000;
 
 class Guard {
  public:
@@ -282,8 +286,15 @@ void loop() {
   }
   if (!wifi && connected) { connected = false; http.stop(); MDNS.end(); Guard guard; stream.stop(); }
   if (!wifi) service_failed = false; // A fresh Wi-Fi connection retries services immediately.
-  if (!wifi && uint32_t(millis() - last_retry) >= 5000 && configured_ssid.length()) {
+  // WiFi.reconnect() aborts any attempt in progress, and Arduino-ESP32 2.x reports WL_DISCONNECTED
+  // while associating and WL_IDLE_STATUS while DHCP is pending, so status cannot separate a slow
+  // attempt from a stalled one. Auto-reconnect handles ordinary drops; only force a reconnect after
+  // a stall measured from the last connection or forced attempt, with exponential backoff.
+  static uint32_t retry_delay = kWifiRetryInitialMs;
+  if (wifi) { last_retry = millis(); retry_delay = kWifiRetryInitialMs; }
+  else if (uint32_t(millis() - last_retry) >= retry_delay && configured_ssid.length()) {
     last_retry = millis(); WiFi.reconnect();
+    retry_delay = retry_delay >= kWifiRetryMaxMs / 2 ? kWifiRetryMaxMs : retry_delay * 2;
   }
   if (connected) http.handleClient();
   delay(1);
