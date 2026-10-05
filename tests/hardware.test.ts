@@ -3,7 +3,6 @@ import legacy from './fixtures/configuration-v1.json';
 import fixture from './fixtures/configuration.json';
 import {
   clone,
-  migrateConfiguration,
   validateConfiguration,
   type Configuration,
 } from '../src/domain/model';
@@ -59,17 +58,7 @@ export class FakeHardware implements HardwareClient {
 const stores: AppStore[] = [];
 afterEach(() => stores.splice(0).forEach((s) => s.dispose()));
 describe('physical identity and configuration', () => {
-  it('migrates v1 without mutation or lossy defaults and strictly rejects transient fields', () => {
-    const original = clone(legacy);
-    const result = migrateConfiguration(legacy);
-    expect(result.schemaVersion).toBe(2);
-    expect(
-      result.rooms[0].lights.every((light) => light.output.kind === 'virtual'),
-    ).toBe(true);
-    expect(result.rooms[0].lights.map((l) => l.id)).toEqual(
-      legacy.rooms[0].lights.map((l) => l.id),
-    );
-    expect(legacy).toEqual(original);
+  it('strictly rejects transient fields and leaves v1 migration to native load', () => {
     for (const output of [
       { kind: 'esp32', deviceId: 'IOT-A1B2C3' },
       { kind: 'esp32', deviceId: id, ip: '192.168.1.20' },
@@ -80,12 +69,7 @@ describe('physical identity and configuration', () => {
       Object.assign(invalid.rooms[0].lights[0], { output });
       expect(() => validateConfiguration(invalid)).toThrow();
     }
-    const invalid = clone(legacy);
-    Object.assign(invalid.rooms[0].lights[0], { output: { kind: 'virtual' } });
-    expect(() => migrateConfiguration(invalid)).toThrow();
-    expect(() =>
-      migrateConfiguration({ ...legacy, schemaVersion: 99 }),
-    ).toThrow('version');
+    expect(() => validateConfiguration(clone(legacy))).toThrow('version');
   });
   it('binds once using full identity; offline, reload, and discovery never mutate room IDs', async () => {
     const persistence = new MemoryPersistence();

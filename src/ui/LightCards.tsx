@@ -18,7 +18,6 @@ export function LightCards({
 }) {
   const store = useStore();
   const elements = useRef(new Map<string, HTMLElement>());
-  const row = useRef<HTMLDivElement>(null);
   useEffect(() => {
     let frame = 0;
     const paint = () => {
@@ -53,7 +52,6 @@ export function LightCards({
   return (
     <div
       className={`light-cards ${editable ? '' : 'light-cards-compact'}`}
-      ref={row}
       aria-label={
         lights[0]?.output.kind === 'esp32'
           ? 'Physical lights'

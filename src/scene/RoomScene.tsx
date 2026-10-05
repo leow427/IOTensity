@@ -155,7 +155,6 @@ function CameraControl({
     // Bind listeners in the effect so React's development remounts reconnect
     // cleanly, without side effects from a discarded render.
     controls.connect(gl.domElement);
-    controls.target.set(0, 0.9, 1.15);
     controls.enablePan = false;
     controls.enableDamping = true;
     controls.dampingFactor = 0.12;
@@ -198,7 +197,6 @@ function Orb({
   store: AppStore;
   setDragging: (value: boolean) => void;
 }) {
-  const orb = useRef<Mesh>(null);
   const halo = useRef<Mesh>(null);
   const selectionRing = useRef<Mesh>(null);
   const material = useRef<MeshBasicMaterial>(null);
@@ -314,7 +312,6 @@ function Orb({
         />
       </mesh>
       <mesh
-        ref={orb}
         position={[0, p.y, 0]}
         onPointerDown={down}
         onPointerMove={move}
