@@ -30,7 +30,14 @@ pub const STALL_TIMEOUT: Duration = Duration::from_millis(250);
 /// Pause before recreating an mDNS daemon that could not be created or browse.
 const DISCOVERY_RETRY_DELAY: Duration = Duration::from_secs(2);
 const DAEMON_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+const IDENTIFY_TIMEOUT: Duration = Duration::from_secs(4);
 type IdentifyReply = mpsc::SyncSender<Result<(), String>>;
+struct PendingIdentify {
+    request: u64,
+    // The caller stops waiting here; a later blink would contradict its error.
+    deadline: Instant,
+    reply: IdentifyReply,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceView {
@@ -55,7 +62,7 @@ struct Device {
     advertisements: HashMap<String, Vec<SocketAddrV4>>,
     connection: ConnectionState,
     worker: bool,
-    identify: Option<IdentifyReply>,
+    identify: Option<PendingIdentify>,
 }
 #[derive(Default)]
 struct State {
@@ -69,8 +76,51 @@ struct State {
     output_available: bool,
     last_publish: Option<Instant>,
     preview: Option<preview::Preview>,
+    identify_requests: u64,
 }
 impl State {
+    fn queue_identify(
+        &mut self,
+        id: &str,
+        reply: IdentifyReply,
+        timeout: Duration,
+        now: Instant,
+    ) -> Result<u64, String> {
+        let device = self
+            .devices
+            .get_mut(id)
+            .ok_or("Discover this light before identifying it.")?;
+        if !device.connection.online {
+            return Err("Light is offline.".into());
+        }
+        if device.identify.as_ref().is_some_and(|p| now < p.deadline) {
+            return Err("Identify is already pending.".into());
+        }
+        self.identify_requests += 1;
+        device.identify = Some(PendingIdentify {
+            request: self.identify_requests,
+            deadline: now + timeout,
+            reply,
+        });
+        Ok(self.identify_requests)
+    }
+    /// Clears only the caller's own request, never a newer one.
+    fn cancel_identify(&mut self, id: &str, request: u64) {
+        if let Some(device) = self.devices.get_mut(id) {
+            if device
+                .identify
+                .as_ref()
+                .is_some_and(|p| p.request == request)
+            {
+                device.identify = None;
+            }
+        }
+    }
+    /// Requests whose caller already timed out are dropped without blinking.
+    fn take_identify(&mut self, id: &str, now: Instant) -> Option<IdentifyReply> {
+        let pending = self.devices.get_mut(id)?.identify.take()?;
+        (now < pending.deadline).then_some(pending.reply)
+    }
     fn color(&self, id: &str) -> Option<(String, [u8; 3])> {
         if let Some(preview) = self.preview.as_ref().filter(|p| p.device_id == id) {
             return Some((
@@ -327,24 +377,20 @@ impl HardwareService {
         state.output.clone()
     }
     pub fn identify(&self, id: &str) -> Result<(), String> {
+        self.identify_within(id, IDENTIFY_TIMEOUT)
+    }
+    fn identify_within(&self, id: &str, timeout: Duration) -> Result<(), String> {
         let (sender, receiver) = mpsc::sync_channel(1);
-        {
-            let mut state = self.0.state.lock().unwrap();
-            let device = state
-                .devices
-                .get_mut(id)
-                .ok_or("Discover this light before identifying it.")?;
-            if !device.connection.online {
-                return Err("Light is offline.".into());
-            }
-            if device.identify.is_some() {
-                return Err("Identify is already pending.".into());
-            }
-            device.identify = Some(sender);
-        }
-        receiver
-            .recv_timeout(Duration::from_secs(4))
-            .map_err(|_| "Identify timed out. Try again.".to_string())?
+        let request =
+            self.0
+                .state
+                .lock()
+                .unwrap()
+                .queue_identify(id, sender, timeout, Instant::now())?;
+        receiver.recv_timeout(timeout).map_err(|_| {
+            self.0.state.lock().unwrap().cancel_identify(id, request);
+            "Identify timed out. Try again.".to_string()
+        })?
     }
     pub fn shutdown(&self) {
         self.set_running(false, false);
@@ -613,7 +659,7 @@ impl HardwareService {
                     break;
                 };
                 device.connection = next;
-                device.identify.take()
+                state.take_identify(&id, Instant::now())
             };
             if let Some(reply) = identify {
                 let _ = reply.send(connection.identify(&control));
@@ -869,6 +915,78 @@ mod tests {
                 ..Default::default()
             },
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn identify_timeout_clears_only_its_own_request() {
+        let id = "esp32-020000a1b2c3";
+        let mut state = State::default();
+        state.devices.insert(id.into(), online_device());
+        let now = Instant::now();
+        let first = state
+            .queue_identify(id, mpsc::sync_channel(1).0, IDENTIFY_TIMEOUT, now)
+            .unwrap();
+        assert_eq!(
+            state.queue_identify(id, mpsc::sync_channel(1).0, IDENTIFY_TIMEOUT, now),
+            Err("Identify is already pending.".into())
+        );
+        state.cancel_identify(id, first);
+        let second = state
+            .queue_identify(id, mpsc::sync_channel(1).0, IDENTIFY_TIMEOUT, now)
+            .unwrap();
+        // A late cancellation from the first caller must not drop the newer click.
+        state.cancel_identify(id, first);
+        assert!(state.devices[id].identify.is_some());
+        state.cancel_identify(id, second);
+        assert!(state.devices[id].identify.is_none());
+    }
+
+    #[test]
+    fn worker_skips_identify_whose_caller_timed_out() {
+        let id = "esp32-020000a1b2c3";
+        let mut state = State::default();
+        state.devices.insert(id.into(), online_device());
+        let now = Instant::now();
+        let (reply, _receiver) = mpsc::sync_channel(1);
+        state
+            .queue_identify(id, reply, IDENTIFY_TIMEOUT, now)
+            .unwrap();
+        assert!(state.take_identify(id, now + IDENTIFY_TIMEOUT).is_none());
+        assert!(state.devices[id].identify.is_none());
+        let (reply, _receiver) = mpsc::sync_channel(1);
+        state
+            .queue_identify(id, reply, IDENTIFY_TIMEOUT, now)
+            .unwrap();
+        assert!(state.take_identify(id, now).is_some());
+        assert!(state.take_identify(id, now).is_none());
+    }
+
+    #[test]
+    fn timed_out_identify_allows_a_new_request() {
+        let id = "esp32-020000a1b2c3";
+        let service = HardwareService(Arc::new(Inner {
+            state: Mutex::new(State::default()),
+            shutdown: AtomicBool::new(false),
+            retry_discovery: AtomicBool::new(false),
+            client_id: "0".repeat(32),
+        }));
+        service
+            .0
+            .state
+            .lock()
+            .unwrap()
+            .devices
+            .insert(id.into(), online_device());
+        // No worker runs, so every request times out.
+        for _ in 0..2 {
+            assert_eq!(
+                service.identify_within(id, Duration::from_millis(10)),
+                Err("Identify timed out. Try again.".into())
+            );
+            assert!(service.0.state.lock().unwrap().devices[id]
+                .identify
+                .is_none());
         }
     }
 
