@@ -5,12 +5,10 @@ pub mod processing;
 use crate::config::Configuration;
 use processing::{generated_image, LightColor, Processor, OUTPUT_INTERVAL};
 use serde::{Deserialize, Serialize};
-#[cfg(any(target_os = "macos", test))]
-use std::time::Duration;
 use std::{
     sync::{Arc, Mutex},
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tauri::Emitter;
 
@@ -98,6 +96,38 @@ impl Runtime {
                 )
             };
         }
+    }
+}
+
+// ScreenCaptureKit start/stop completion handlers have no documented deadline;
+// a stop normally confirms well under a second. Bound Stopping so a lost
+// completion cannot block later starts. Physical output is already off while
+// Stopping, and an abandoned native capture still stops itself if a late start
+// or stop completion arrives (each handle owns independent native state).
+const CAPTURE_STOP_TIMEOUT: Duration = Duration::from_secs(3);
+
+impl Runtime {
+    // `native` is the capture's (state, message), or None without a capture.
+    // Returns true once Stopping has ended and the capture handle can be dropped.
+    fn update_stopping(
+        &mut self,
+        native: Option<(i32, String)>,
+        since: Instant,
+        now: Instant,
+    ) -> bool {
+        let (status, message) = match native {
+            None | Some((3, _)) => (Status::Stopped, String::new()),
+            Some((4, message)) => (Status::Error, message),
+            Some(_) if now.saturating_duration_since(since) >= CAPTURE_STOP_TIMEOUT => (
+                Status::Error,
+                "Display capture did not confirm that it stopped. Start again to retry, or restart IOTensity if the screen recording indicator remains.".into(),
+            ),
+            Some(_) => return false,
+        };
+        self.snapshot.status = status;
+        self.snapshot.message = message;
+        self.processor.image = None;
+        true
     }
 }
 
@@ -191,6 +221,7 @@ impl SyncService {
             let mut last_emitted = u64::MAX;
             #[cfg(target_os = "macos")]
             let mut capture: Option<capture::Capture> = None;
+            let mut stopping_since: Option<Instant> = None;
             loop {
                 let now = Instant::now();
                 let dt = now.duration_since(last).as_secs_f32();
@@ -237,27 +268,22 @@ impl SyncService {
                             rt.snapshot.sequence += 1;
                         }
                         Status::Stopping => {
-                            #[cfg(not(target_os = "macos"))]
-                            let stopped = true;
                             #[cfg(target_os = "macos")]
-                            let mut stopped = true;
-                            #[cfg(target_os = "macos")]
-                            if let Some(stream) = &capture {
+                            let native = capture.as_ref().map(|stream| {
                                 stream.stop();
-                                let (state, message) = stream.state();
-                                stopped = state == 3;
-                                if state == 4 {
-                                    rt.snapshot.status = Status::Error;
-                                    rt.snapshot.message = message;
-                                    capture = None;
-                                } else if stopped {
+                                stream.state()
+                            });
+                            #[cfg(not(target_os = "macos"))]
+                            let native = None;
+                            let since = *stopping_since.get_or_insert(now);
+                            if rt.update_stopping(native, since, now) {
+                                stopping_since = None;
+                                #[cfg(target_os = "macos")]
+                                {
+                                    // Dropping releases only Rust's reference; pending
+                                    // native completions finish on the abandoned object.
                                     capture = None;
                                 }
-                            }
-                            if stopped {
-                                rt.snapshot.status = Status::Stopped;
-                                rt.snapshot.message = "".into();
-                                rt.processor.image = None;
                             }
                             rt.snapshot.sequence += 1;
                         }
@@ -575,6 +601,62 @@ mod tests {
     }
 
     #[test]
+    fn display_stop_ends_on_native_confirmation_failure_or_deadline() {
+        let since = Instant::now();
+        for (native, status, message) in [
+            (None, Status::Stopped, ""),
+            (Some((3, String::new())), Status::Stopped, ""),
+            (
+                Some((4, "Could not stop".into())),
+                Status::Error,
+                "Could not stop",
+            ),
+        ] {
+            let service = configured(Source::Display);
+            service.stop();
+            let mut rt = service.inner.lock().unwrap();
+            assert!(rt.update_stopping(native, since, since));
+            assert_eq!(rt.snapshot.status, status);
+            assert_eq!(rt.snapshot.message, message);
+        }
+
+        // A start or stop completion that never arrives leaves the native state
+        // at stopping (2); the deadline releases the handle so Sync can restart.
+        let service = configured(Source::Display);
+        let now = Instant::now();
+        {
+            let mut rt = service.inner.lock().unwrap();
+            rt.update_display(display_update(0, 0, true));
+            rt.render(0.033);
+        }
+        let held = service.snapshot().colors;
+        assert!(!held.is_empty());
+        assert_eq!(service.stop().status, Status::Stopping);
+        let mut rt = service.inner.lock().unwrap();
+        for elapsed in [0, 33, 1_000, 2_999] {
+            let at = now + Duration::from_millis(elapsed);
+            assert!(!rt.update_stopping(Some((2, String::new())), now, at));
+            assert_eq!(rt.snapshot.status, Status::Stopping);
+        }
+        drop(rt);
+        assert!(service.start(Source::Display).is_err());
+        let mut rt = service.inner.lock().unwrap();
+        assert!(rt.update_stopping(Some((2, String::new())), now, now + CAPTURE_STOP_TIMEOUT));
+        assert_eq!(rt.snapshot.status, Status::Error);
+        assert!(rt
+            .snapshot
+            .message
+            .contains("did not confirm that it stopped"));
+        assert!(rt.processor.image.is_none());
+        assert_eq!(rt.snapshot.colors, held); // Virtual colors hold; physical output is off.
+        drop(rt);
+        assert_eq!(
+            service.start(Source::Display).unwrap().status,
+            Status::Starting
+        );
+    }
+
+    #[test]
     fn reduced_motion_updates_an_active_simulation_without_restarting_it() {
         let service = configured(Source::Simulation);
         {
@@ -643,7 +725,7 @@ mod tests {
             service.start(source).unwrap();
             let mut rt = service.inner.lock().unwrap();
             if source == Source::Display {
-                rt.update_display(display_update(0, 0, true), Instant::now());
+                rt.update_display(display_update(0, 0, true));
             } else {
                 rt.update_local_source();
             }
