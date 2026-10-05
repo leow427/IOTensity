@@ -385,6 +385,16 @@ export class AppStore {
     return task;
   }
   async saveRoom(): Promise<boolean> {
+    const saved = await this.persistRoom();
+    // A close requested while this save was in flight waits for its outcome:
+    // a clean room closes without asking, a dirty one keeps the dialog.
+    if (saved && this.state.pending === 'close' && !this.dirty) {
+      this.set({ pending: null });
+      await this.finishTransition('close');
+    }
+    return saved;
+  }
+  private async persistRoom(): Promise<boolean> {
     if (!this.state.draft || !this.canEdit) return false;
     this.clearLightPreview();
     if (!this.dirty) return true;
@@ -507,13 +517,21 @@ export class AppStore {
       this.set({ pending: null });
       return;
     }
-    if (choice === 'save' && !(await this.saveRoom())) {
+    if (choice === 'save' && !(await this.persistRoom())) {
+      // Like Stay, a failed save cancels any close, including one requested
+      // while it was in flight, and keeps the draft in the editor.
+      if (destination === 'close' || this.state.pending === 'close')
+        this.closeGeneration++;
       this.set({ pending: null, page: 'rooms' });
       return;
     }
     if (choice === 'discard') this.discard();
+    // A close requested during the save replaced the dialog's destination;
+    // honor both, closing last because it also leaves the page.
+    const close = destination !== 'close' && this.state.pending === 'close';
     this.set({ pending: null });
     await this.finishTransition(destination);
+    if (close) await this.finishTransition('close');
   }
   private async finishTransition(destination: Destination) {
     if (destination === 'close') {
