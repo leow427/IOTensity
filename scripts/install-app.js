@@ -10,11 +10,19 @@ import {
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
+// CI providers set CI=true; an explicit CI=false or CI=0 is a local build.
+function isCi(env) {
+  const value = String(env.CI ?? '')
+    .trim()
+    .toLowerCase();
+  return value !== '' && value !== 'false' && value !== '0';
+}
+
 // Custom/test bundles and cross-compilation must never replace the everyday app.
 export function shouldInstallApp(platform, args, env = {}) {
   return (
     platform === 'darwin' &&
-    !env.CI &&
+    !isCi(env) &&
     args[0] === 'build' &&
     args.slice(1).every((arg) => ['--verbose', '-v'].includes(arg))
   );

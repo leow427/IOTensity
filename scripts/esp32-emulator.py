@@ -9,10 +9,10 @@ import ctypes as ct
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import socket
 import subprocess
-import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,7 +30,7 @@ def receiver():
                     "-o", str(output)], cwd=ROOT, check=True)
     lib = ct.CDLL(str(output))
     lib.rgb_create.restype = ct.c_void_p
-    for name in ["rgb_destroy", "rgb_stop", "rgb_active", "rgb_accepted"]:
+    for name in ["rgb_stop", "rgb_active", "rgb_accepted"]:
         getattr(lib, name).argtypes = [ct.c_void_p]
     lib.rgb_accepted.restype = ct.c_uint32
     lib.rgb_expire.argtypes = [ct.c_void_p, ct.c_uint32]
@@ -59,7 +59,6 @@ class Emulator:
         self.offline_until = 0
         self.identifies = 0
         self.owner = None
-        self.arrivals = []
         self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp.bind((args.bind, args.udp_port))
         self.udp.settimeout(0.05)
@@ -87,9 +86,7 @@ class Emulator:
                 with self.lock:
                     if time.monotonic() < self.offline_until:
                         continue
-                    if self.lib.rgb_receive(self.stream, array(data), len(data), ip_number(peer[0]), self.now()):
-                        self.arrivals.append(time.monotonic())
-                        self.arrivals = self.arrivals[-120:]
+                    self.lib.rgb_receive(self.stream, array(data), len(data), ip_number(peer[0]), self.now())
             except socket.timeout:
                 with self.lock:
                     self.lib.rgb_expire(self.stream, self.now())
@@ -163,7 +160,6 @@ def main():
     parser.add_argument("--id", default="esp32-020000a1b2c3")
     parser.add_argument("--test-api", action="store_true")
     args = parser.parse_args()
-    import re
     if not re.fullmatch(r"esp32-[0-9a-f]{12}", args.id):
         parser.error("Expected full esp32-<12 lowercase hex> ID")
     emulator = Emulator(args)

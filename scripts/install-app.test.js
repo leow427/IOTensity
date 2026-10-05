@@ -52,7 +52,12 @@ test('installs only ordinary local release builds', () => {
   ]) {
     assert.equal(shouldInstallApp('darwin', args), false);
   }
-  assert.equal(shouldInstallApp('darwin', ['build'], { CI: 'true' }), false);
+  for (const CI of ['true', '1', 'TRUE', 'github-actions']) {
+    assert.equal(shouldInstallApp('darwin', ['build'], { CI }), false);
+  }
+  for (const CI of ['', 'false', 'FALSE', '0']) {
+    assert.equal(shouldInstallApp('darwin', ['build'], { CI }), true);
+  }
   assert.equal(shouldInstallApp('win32', ['build']), false);
 });
 
