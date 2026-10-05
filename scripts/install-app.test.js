@@ -48,6 +48,9 @@ const version = (path) => readFileSync(join(path, 'version'), 'utf8');
 test('installs only ordinary local release builds', () => {
   assert.equal(shouldInstallApp('darwin', ['build']), true);
   assert.equal(shouldInstallApp('darwin', ['build', '-v']), true);
+  assert.equal(shouldInstallApp('darwin', ['-v', 'build']), true);
+  assert.equal(shouldInstallApp('darwin', ['-vv', 'build', '-v']), true);
+  assert.equal(shouldInstallApp('darwin', ['--verbose', 'build']), true);
   for (const args of [
     ['dev'],
     ['bundle'],
@@ -56,6 +59,13 @@ test('installs only ordinary local release builds', () => {
     ['build', '--config', 'test.json'],
     ['build', '--target', 'aarch64-apple-darwin'],
     ['build', '--help'],
+    ['--help'],
+    ['-v', 'dev'],
+    ['-v', 'build', '--no-bundle'],
+    ['-v', 'build', '--debug'],
+    ['build', '--', '--foo'],
+    ['build', 'build'],
+    ['--', 'build'],
   ]) {
     assert.equal(shouldInstallApp('darwin', args), false);
   }

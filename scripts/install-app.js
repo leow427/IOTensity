@@ -9,14 +9,15 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { tauriSubcommand } from './signing.js';
 
 // Custom/test bundles and cross-compilation must never replace the everyday app.
 export function shouldInstallApp(platform, args, env = {}) {
   return (
     platform === 'darwin' &&
     !env.CI &&
-    args[0] === 'build' &&
-    args.slice(1).every((arg) => ['--verbose', '-v'].includes(arg))
+    tauriSubcommand(args) === 'build' &&
+    args.filter((arg) => !/^(-v+|--verbose)$/.test(arg)).length === 1
   );
 }
 

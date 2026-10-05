@@ -5,6 +5,7 @@ import {
   isMacBundle,
   parseIdentities,
   requestedIdentity,
+  tauriSubcommand,
 } from './signing.js';
 
 const development = {
@@ -85,4 +86,39 @@ test('requires signing for macOS bundles while preserving portable CI compilatio
   assert.equal(isMacBundle('win32', ['build']), false);
   assert.equal(isMacBundle('linux', ['build']), false);
   assert.equal(isMacBundle('darwin', ['dev']), false);
+});
+
+test('finds the Tauri subcommand after global options but never after --', () => {
+  assert.equal(tauriSubcommand(['build']), 'build');
+  assert.equal(tauriSubcommand(['-v', 'build']), 'build');
+  assert.equal(tauriSubcommand(['-vv', 'build', '--debug']), 'build');
+  assert.equal(tauriSubcommand(['--verbose', 'dev']), 'dev');
+  assert.equal(tauriSubcommand(['--', 'build']), undefined);
+  assert.equal(tauriSubcommand(['--help']), undefined);
+  assert.equal(tauriSubcommand([]), undefined);
+});
+
+test('requires signing when global options precede the bundle subcommand', () => {
+  for (const args of [
+    ['-v', 'build'],
+    ['-vv', 'build'],
+    ['--verbose', 'build'],
+    ['--verbose', 'bundle'],
+    ['build', '--', '--foo'],
+    // Runner arguments cannot disable Tauri bundling or show Tauri help.
+    ['build', '--', '--no-bundle'],
+    ['build', '--', '--help'],
+  ]) {
+    assert.equal(isMacBundle('darwin', args), true, args.join(' '));
+  }
+  for (const args of [
+    ['-v', 'dev'],
+    ['-v', 'build', '--no-bundle'],
+    ['--help'],
+    ['-h', 'build'],
+    ['-v', 'build', '--help'],
+    ['--', 'build'],
+  ]) {
+    assert.equal(isMacBundle('darwin', args), false, args.join(' '));
+  }
 });

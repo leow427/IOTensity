@@ -8,6 +8,7 @@ import {
   isMacBundle,
   parseIdentities,
   requestedIdentity,
+  tauriSubcommand,
 } from './signing.js';
 import {
   appInstallation,
@@ -60,7 +61,7 @@ try {
   }
   if (
     process.platform === 'darwin' &&
-    (args[0] === 'dev' || args.includes('--debug'))
+    (tauriSubcommand(args) === 'dev' || args.includes('--debug'))
   ) {
     // Tauri dev runs an unbundled executable. Its permissions and configuration
     // must never replace those belonging to the signed release app.

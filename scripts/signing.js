@@ -34,12 +34,30 @@ export function chooseIdentity(identities, requested) {
   return identities[0];
 }
 
+// Tauri's only global options (-v/--verbose, -h/--help, -V/--version) take no
+// value. Skip options to find the subcommand; tokens after `--` belong to the
+// runner, so they never select one.
+export function tauriSubcommand(args) {
+  for (const arg of args) {
+    if (arg === '--') return undefined;
+    if (!arg.startsWith('-')) return arg;
+  }
+  return undefined;
+}
+
+// Tauri's own options; anything after `--` is passed through to the runner.
+function tauriOptions(args) {
+  const end = args.indexOf('--');
+  return end === -1 ? args : args.slice(0, end);
+}
+
 export function isMacBundle(platform, args) {
+  const options = tauriOptions(args);
   return (
     platform === 'darwin' &&
-    ['build', 'bundle'].includes(args[0]) &&
-    !args.includes('--no-bundle') &&
-    !args.includes('--help') &&
-    !args.includes('-h')
+    ['build', 'bundle'].includes(tauriSubcommand(args)) &&
+    !options.includes('--no-bundle') &&
+    !options.includes('--help') &&
+    !options.includes('-h')
   );
 }
