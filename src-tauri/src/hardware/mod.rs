@@ -581,7 +581,12 @@ impl HardwareService {
                 .clone();
             let identify = {
                 let mut state = self.0.state.lock().unwrap();
-                if state.wish(&id).as_ref() != Some(&wish) {
+                // Late responses for an obsolete binding or run state are discarded;
+                // endpoint-only discovery changes do not invalidate a verified result.
+                if !state
+                    .wish(&id)
+                    .is_some_and(|latest| latest.same_stream(&wish))
+                {
                     continue;
                 }
                 let Some(device) = state.devices.get_mut(&id) else {
@@ -653,6 +658,17 @@ mod tests {
         assert_eq!(state.wish(&id).unwrap(), wish);
         assert_eq!(state.binding(&id), Some(logical_id));
         assert_eq!(state.devices.len(), 1);
+        // An expired mDNS record changes only candidates, never the stream itself.
+        state
+            .devices
+            .get_mut(&id)
+            .unwrap()
+            .advertisements
+            .remove("light._iotensity._tcp.local.");
+        assert!(state.wish(&id).unwrap().endpoints.is_empty());
+        assert!(state.wish(&id).unwrap().same_stream(&wish));
+        state.config.rooms[0].lights.pop();
+        assert!(!state.wish(&id).unwrap().same_stream(&wish));
         state.devices.get_mut(&id).unwrap().connection.online = false;
         state.reset_discovery();
         assert!(state.wish(&id).unwrap().endpoints.is_empty());

@@ -127,7 +127,16 @@ pub struct Wish {
     pub epoch: u64,
     pub light_id: Option<String>,
     pub running: bool,
+    /// Advertised candidates. Changing only these never tears down a verified stream.
     pub endpoints: Vec<SocketAddrV4>,
+}
+impl Wish {
+    /// Binding, running state and epoch decide whether a session must be replaced.
+    pub fn same_stream(&self, other: &Wish) -> bool {
+        self.epoch == other.epoch
+            && self.light_id == other.light_id
+            && self.running == other.running
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
@@ -182,28 +191,40 @@ impl Connection {
     }
     /// The clock and control transport are injected so reconnect tests need no sleeps.
     pub fn step(&mut self, now: u64, wish: &Wish, control: &impl Control) -> &ConnectionState {
-        if self.wish.as_ref() != Some(wish) {
-            self.close(control);
-            self.wish = Some(wish.clone());
-            self.endpoint = None;
-            self.failures = 0;
-            self.next_check = now;
+        match &self.wish {
+            Some(old) if old.same_stream(wish) => {
+                // mDNS expiry or a partial re-resolve while unicast control still
+                // works must not stop the light. A verified endpoint is kept until
+                // its own status probe fails; new candidates wait for reconnects.
+                if self.endpoint.is_none() && old.endpoints != wish.endpoints {
+                    self.failures = 0;
+                    self.next_check = now;
+                }
+            }
+            _ => {
+                self.close(control);
+                self.endpoint = None;
+                self.failures = 0;
+                self.next_check = now;
+            }
         }
+        self.wish = Some(wish.clone());
         if now < self.next_check {
             return &self.state;
         }
         self.next_check = now + 500;
         self.state.target = None;
-        if wish.endpoints.is_empty() {
+        let Some(endpoint) = self.endpoint.or_else(|| {
+            wish.endpoints
+                .get(self.cursor % wish.endpoints.len().max(1))
+                .copied()
+        }) else {
             self.state = ConnectionState {
                 message: "Offline · waiting for discovery".into(),
                 ..Default::default()
             };
             return &self.state;
-        }
-        let endpoint = self
-            .endpoint
-            .unwrap_or(wish.endpoints[self.cursor % wish.endpoints.len()]);
+        };
         let result = self.check(endpoint, wish, control);
         match result {
             Ok(target) => {
