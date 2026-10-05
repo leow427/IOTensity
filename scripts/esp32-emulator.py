@@ -6,6 +6,7 @@ can reboot the emulated receiver or temporarily simulate an unavailable device.
 """
 import argparse
 import ctypes as ct
+import errno
 import json
 import os
 from pathlib import Path
@@ -66,6 +67,8 @@ class Emulator:
         self.identifies = 0
         self.owner = None
         self.arrivals = []
+        self.closing = False
+        self.udp_failed = False
         self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp.bind((args.bind, args.udp_port))
         self.udp.settimeout(0.05)
@@ -86,19 +89,37 @@ class Emulator:
                     "rgb": list(rgb), "acceptedFrames": self.lib.rgb_accepted(self.stream),
                     "identifyCount": self.identifies}
 
-    def receive(self):
-        while True:
-            try:
-                data, peer = self.udp.recvfrom(2048)
-                with self.lock:
-                    if time.monotonic() < self.offline_until:
-                        continue
-                    if self.lib.rgb_receive(self.stream, array(data), len(data), ip_number(peer[0]), self.now()):
-                        self.arrivals.append(time.monotonic())
-                        self.arrivals = self.arrivals[-120:]
-            except socket.timeout:
-                with self.lock:
-                    self.lib.rgb_expire(self.stream, self.now())
+    def receive(self, on_failure):
+        """UDP task. Transient socket errors are logged once and survived; anything
+        that ends the loop outside shutdown stops the emulator instead of leaving
+        HTTP healthy while frames are silently dropped."""
+        reported = set()
+        try:
+            while not self.closing:
+                try:
+                    data, peer = self.udp.recvfrom(2048)
+                    with self.lock:
+                        if time.monotonic() < self.offline_until:
+                            continue
+                        if self.lib.rgb_receive(self.stream, array(data), len(data), ip_number(peer[0]), self.now()):
+                            self.arrivals.append(time.monotonic())
+                            self.arrivals = self.arrivals[-120:]
+                except socket.timeout:
+                    with self.lock:
+                        self.lib.rgb_expire(self.stream, self.now())
+                except OSError as error:
+                    if self.closing or error.errno == errno.EBADF or self.udp.fileno() < 0:
+                        raise
+                    key = (type(error).__name__, error.errno)
+                    if key not in reported:
+                        reported.add(key)
+                        print(f"UDP receive error (continuing): {error!r}", file=sys.stderr, flush=True)
+                    time.sleep(0.01)
+        except Exception as error:
+            if not self.closing:
+                self.udp_failed = True
+                print(f"UDP receiver stopped unexpectedly: {error!r}", file=sys.stderr, flush=True)
+                on_failure()
 
     def handler(self):
         emulator = self
@@ -230,16 +251,20 @@ def main():
                        server="iotensity-" + args.id[6:] + ".local.")
     mdns = Zeroconf(interfaces=[args.bind])
     mdns.register_service(info)
-    threading.Thread(target=emulator.receive, daemon=True).start()
+    threading.Thread(target=emulator.receive, args=(http.shutdown,), daemon=True).start()
     print(json.dumps({"deviceId": args.id, "http": f"http://{args.bind}:{http.server_port}", "udpPort": emulator.udp_port}), flush=True)
     try:
         http.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        emulator.closing = True
         mdns.unregister_service(info)
         mdns.close()
         http.server_close()
+        emulator.udp.close()
+    if emulator.udp_failed:
+        sys.exit("UDP receiver failed; emulator stopped")
 
 
 if __name__ == "__main__":
