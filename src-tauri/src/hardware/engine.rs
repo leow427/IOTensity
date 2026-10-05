@@ -1,7 +1,7 @@
 use crate::config::{Configuration, Intensity};
 use crate::sync::processing::{linear_to_srgb, srgb_to_linear};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct Color {
@@ -68,8 +68,8 @@ impl Simulation {
                 }),
             });
         }
-        self.colors
-            .retain(|id, _| colors.iter().any(|c| c.id == *id));
+        let current: HashSet<&str> = colors.iter().map(|c| c.id.as_str()).collect();
+        self.colors.retain(|id, _| current.contains(id.as_str()));
         OutputSnapshot {
             sequence: 0,
             running: true,

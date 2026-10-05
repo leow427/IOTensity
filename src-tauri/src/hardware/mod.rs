@@ -11,6 +11,7 @@ use engine::OutputSnapshot;
 use mdns_sd::{DaemonEvent, ServiceDaemon, ServiceEvent};
 use serde::Serialize;
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
     net::{Ipv4Addr, SocketAddrV4, UdpSocket},
     sync::{
@@ -85,6 +86,32 @@ struct State {
     preview: Option<preview::Preview>,
     identify_requests: u64,
     workers: u64,
+    /// Saved device ID → logical light ID, rebuilt only with `config`.
+    bindings: HashMap<String, String>,
+}
+/// Reads only the fields it needs so `prune_targets` can update devices in place.
+fn resolve_color<'a>(
+    preview: Option<&preview::Preview>,
+    output: &OutputSnapshot,
+    bindings: &'a HashMap<String, String>,
+    id: &str,
+) -> Option<(Cow<'a, str>, [u8; 3])> {
+    let binding = bindings.get(id).map(String::as_str);
+    if let Some(preview) = preview.filter(|p| p.device_id == id) {
+        return Some((
+            binding.map_or_else(|| Cow::Owned(format!("preview-{id}")), Cow::Borrowed),
+            preview.rgb,
+        ));
+    }
+    if !output.running {
+        return None;
+    }
+    let light_id = binding?;
+    output
+        .colors
+        .iter()
+        .find(|c| c.id == light_id)
+        .map(|c| (Cow::Borrowed(light_id), c.rgb))
 }
 impl State {
     fn queue_identify(
@@ -129,22 +156,20 @@ impl State {
         let pending = self.devices.get_mut(id)?.identify.take()?;
         (now < pending.deadline).then_some(pending.reply)
     }
-    fn color(&self, id: &str) -> Option<(String, [u8; 3])> {
-        if let Some(preview) = self.preview.as_ref().filter(|p| p.device_id == id) {
-            return Some((
-                self.binding(id).unwrap_or_else(|| format!("preview-{id}")),
-                preview.rgb,
-            ));
+    fn set_config(&mut self, config: Configuration) {
+        self.bindings.clear();
+        for light in config.rooms.iter().flat_map(|r| &r.lights) {
+            if let LightOutput::Esp32 { device_id } = &light.output {
+                // The first binding wins, as with a scan of the saved rooms.
+                self.bindings
+                    .entry(device_id.clone())
+                    .or_insert_with(|| light.id.clone());
+            }
         }
-        if !self.output.running {
-            return None;
-        }
-        let light_id = self.binding(id)?;
-        self.output
-            .colors
-            .iter()
-            .find(|c| c.id == light_id)
-            .map(|c| (light_id, c.rgb))
+        self.config = config;
+    }
+    fn color(&self, id: &str) -> Option<(Cow<'_, str>, [u8; 3])> {
+        resolve_color(self.preview.as_ref(), &self.output, &self.bindings, id)
     }
     // Sync (any source, including virtual-only rooms) or a physical placement
     // preview needs steady native timing; stopped/expired output does not.
@@ -152,18 +177,12 @@ impl State {
         self.output.running || self.preview.is_some()
     }
     fn prune_targets(&mut self) {
-        let desired: HashMap<_, _> = self
-            .devices
-            .keys()
-            .map(|id| (id.clone(), self.color(id).map(|(light_id, _)| light_id)))
-            .collect();
+        let (preview, output, bindings) = (self.preview.as_ref(), &self.output, &self.bindings);
         for (id, device) in &mut self.devices {
-            if device
-                .connection
-                .target
-                .as_ref()
-                .is_some_and(|target| desired[id].as_ref() != Some(&target.light_id))
-            {
+            if device.connection.target.as_ref().is_some_and(|target| {
+                resolve_color(preview, output, bindings, id)
+                    .is_none_or(|(light_id, _)| light_id != target.light_id.as_str())
+            }) {
                 device.connection.target = None;
             }
         }
@@ -276,29 +295,23 @@ impl State {
             .filter(|d| d.worker == Some(generation))?;
         self.wish(id)
     }
-    fn binding(&self, id: &str) -> Option<String> {
-        self.config
-            .rooms
-            .iter()
-            .flat_map(|r| &r.lights)
-            .find_map(|light| match &light.output {
-                LightOutput::Esp32 { device_id } if device_id == id => Some(light.id.clone()),
-                _ => None,
-            })
+    fn binding(&self, id: &str) -> Option<&str> {
+        self.bindings.get(id).map(String::as_str)
     }
     fn wish(&self, id: &str) -> Option<Wish> {
         let device = self.devices.get(id)?;
         let mut endpoints: Vec<_> = device.advertisements.values().flatten().copied().collect();
         endpoints.sort();
         endpoints.dedup();
+        let light_id = self
+            .output_available
+            .then(|| self.color(id))
+            .flatten()
+            .map(|(light_id, _)| light_id.into_owned());
         Some(Wish {
             epoch: self.epoch,
-            light_id: self
-                .output_available
-                .then(|| self.color(id))
-                .flatten()
-                .map(|(light_id, _)| light_id),
-            running: self.output_available && self.color(id).is_some(),
+            running: light_id.is_some(),
+            light_id,
             endpoints,
         })
     }
@@ -309,28 +322,31 @@ impl State {
             devices: self
                 .devices
                 .iter()
-                .map(|(id, device)| DeviceView {
-                    device_id: id.clone(),
-                    short_id: format!("IOT-{}", id[12..].to_uppercase()),
-                    model: "esp32-rgb".into(),
-                    online: device.connection.online,
-                    streaming: self.output_available
-                        && self.color(id).is_some()
-                        && device.connection.target.is_some(),
-                    message: if self.color(id).is_some() && !self.output_available {
-                        self.output_error
-                            .clone()
-                            .unwrap_or_else(|| "Connecting UDP output…".into())
-                    } else if self.preview.as_ref().is_some_and(|p| &p.device_id == id)
-                        && device.connection.target.is_some()
-                    {
-                        "Position preview".into()
-                    } else if device.connection.message.is_empty() {
-                        "Offline · waiting for discovery".into()
-                    } else {
-                        device.connection.message.clone()
-                    },
-                    bound_light_id: self.binding(id),
+                .map(|(id, device)| {
+                    let colored = self.color(id).is_some();
+                    DeviceView {
+                        device_id: id.clone(),
+                        short_id: format!("IOT-{}", id[12..].to_uppercase()),
+                        model: "esp32-rgb".into(),
+                        online: device.connection.online,
+                        streaming: self.output_available
+                            && colored
+                            && device.connection.target.is_some(),
+                        message: if colored && !self.output_available {
+                            self.output_error
+                                .clone()
+                                .unwrap_or_else(|| "Connecting UDP output…".into())
+                        } else if self.preview.as_ref().is_some_and(|p| &p.device_id == id)
+                            && device.connection.target.is_some()
+                        {
+                            "Position preview".into()
+                        } else if device.connection.message.is_empty() {
+                            "Offline · waiting for discovery".into()
+                        } else {
+                            device.connection.message.clone()
+                        },
+                        bound_light_id: self.binding(id).map(str::to_owned),
+                    }
                 })
                 .collect(),
         }
@@ -369,7 +385,7 @@ impl HardwareService {
         if config.revision < state.config.revision {
             return;
         }
-        state.config = config;
+        state.set_config(config);
         let bound: Vec<_> = state
             .config
             .rooms
@@ -495,13 +511,16 @@ impl HardwareService {
         let mut sequences: HashMap<String, (protocol::Session, u32)> = HashMap::new();
         // Dropped when this loop ends at shutdown.
         let mut activity = crate::activity::Activity::default();
+        // Reused each frame; packets are encoded under the lock and sent after it.
+        let mut packets: Vec<([u8; protocol::PACKET_LEN], SocketAddrV4)> = Vec::new();
         while !self.is_shutdown() {
             output.poll(clock.elapsed().as_millis() as u64, || {
                 let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
                 socket.set_nonblocking(true)?;
                 Ok(socket)
             });
-            let (targets, active) = {
+            packets.clear();
+            let active = {
                 let mut state = self.0.state.lock().unwrap();
                 state.output_available = output.socket.is_some();
                 state.output_error = output.error.clone();
@@ -509,33 +528,41 @@ impl HardwareService {
                 // Keep the sequence through a transient control failure that may
                 // recover the same session via an idempotent start retry.
                 sequences.retain(|id, _| state.devices.contains_key(id));
-                let targets = state
-                    .devices
-                    .iter()
-                    .filter_map(|(id, device)| {
-                        let target = device.connection.target.clone()?;
-                        let (light_id, rgb) = state.color(id)?;
-                        (target.light_id == light_id).then(|| (id.clone(), target, rgb))
-                    })
-                    .collect::<Vec<_>>();
-                (targets, state.needs_activity())
+                if output.socket.is_some() {
+                    for (id, device) in &state.devices {
+                        let Some(target) = &device.connection.target else {
+                            continue;
+                        };
+                        let Some((light_id, rgb)) = state.color(id) else {
+                            continue;
+                        };
+                        if target.light_id != light_id {
+                            continue;
+                        }
+                        if !sequences.contains_key(id) {
+                            sequences.insert(id.clone(), (target.session, 0));
+                        }
+                        let entry = sequences.get_mut(id).expect("sequence inserted above");
+                        if entry.0 != target.session {
+                            *entry = (target.session, 0);
+                        }
+                        let packet = protocol::Frame {
+                            session: target.session,
+                            sequence: entry.1,
+                            rgb,
+                        }
+                        .encode();
+                        packets.push((packet, target.address));
+                        entry.1 = entry.1.wrapping_add(1);
+                    }
+                }
+                state.needs_activity()
             };
             activity.set(active);
             if let Some(socket) = &output.socket {
-                for (id, target, rgb) in targets {
-                    let entry = sequences.entry(id).or_insert((target.session, 0));
-                    if entry.0 != target.session {
-                        *entry = (target.session, 0);
-                    }
-                    let packet = protocol::Frame {
-                        session: target.session,
-                        sequence: entry.1,
-                        rgb,
-                    }
-                    .encode();
+                for (packet, address) in &packets {
                     // A dropped send is replaced by the next complete frame; no queue or retry.
-                    let _ = socket.send_to(&packet, target.address);
-                    entry.1 = entry.1.wrapping_add(1);
+                    let _ = socket.send_to(packet, address);
                 }
             }
             // No catch-up bursts after a slow frame or sleep/wake. Static colors repeat too.
@@ -803,10 +830,10 @@ mod tests {
         let id = device_id.clone();
         let logical_id = light.id.clone();
         let mut state = State {
-            config,
             output_available: true,
             ..State::default()
         };
+        state.set_config(config);
         state.output.running = true;
         state.output.colors.push(engine::Color {
             id: logical_id.clone(),
@@ -834,7 +861,7 @@ mod tests {
         state.reset_discovery();
         assert_eq!(state.devices[&id].connection, before);
         assert_eq!(state.wish(&id).unwrap(), wish);
-        assert_eq!(state.binding(&id), Some(logical_id));
+        assert_eq!(state.binding(&id), Some(logical_id.as_str()));
         assert_eq!(state.devices.len(), 1);
         // An expired mDNS record changes only candidates, never the stream itself.
         state
@@ -845,7 +872,9 @@ mod tests {
             .remove("light._iotensity._tcp.local.");
         assert!(state.wish(&id).unwrap().endpoints.is_empty());
         assert!(state.wish(&id).unwrap().same_stream(&wish));
-        state.config.rooms[0].lights.pop();
+        let mut unbound = state.config.clone();
+        unbound.rooms[0].lights.pop();
+        state.set_config(unbound);
         assert!(!state.wish(&id).unwrap().same_stream(&wish));
         state.devices.get_mut(&id).unwrap().connection.online = false;
         state.reset_discovery();
@@ -945,6 +974,126 @@ mod tests {
     }
 
     #[test]
+    fn cached_bindings_follow_saved_bind_unbind_and_rebind_across_rooms() {
+        // The per-call scan the cache replaces; results must stay identical.
+        fn scanned(config: &Configuration, id: &str) -> Option<String> {
+            config
+                .rooms
+                .iter()
+                .flat_map(|r| &r.lights)
+                .find_map(|light| match &light.output {
+                    LightOutput::Esp32 { device_id } if device_id == id => Some(light.id.clone()),
+                    _ => None,
+                })
+        }
+        let service = HardwareService(Arc::new(Inner {
+            state: Mutex::new(State::default()),
+            shutdown: AtomicBool::new(false),
+            retry_discovery: AtomicBool::new(false),
+            client_id: "test".into(),
+        }));
+        let mut config: Configuration =
+            serde_json::from_str(include_str!("../../../tests/fixtures/configuration.json"))
+                .unwrap();
+        let first = "esp32-aabbcca1b2c3";
+        let second = "esp32-020000112233";
+        let mut office = config.rooms[0].clone();
+        office.id = "office".into();
+        for light in &mut office.lights {
+            light.id = format!("office-{}", light.id);
+            light.output = LightOutput::Virtual;
+        }
+        office.lights[1].output = LightOutput::Esp32 {
+            device_id: second.into(),
+        };
+        config.rooms.push(office);
+        let apply_and_compare = |config: &Configuration| {
+            service.apply_saved(config.clone());
+            let mut state = service.0.state.lock().unwrap();
+            state.output.running = true;
+            state.output.colors = config
+                .rooms
+                .iter()
+                .flat_map(|r| &r.lights)
+                .enumerate()
+                .map(|(i, light)| engine::Color {
+                    id: light.id.clone(),
+                    rgb: [i as u8, 1, 2],
+                })
+                .collect();
+            for id in [first, second, "esp32-0200000000ff"] {
+                let expected = scanned(config, id);
+                assert_eq!(state.binding(id).map(str::to_owned), expected);
+                let color = expected.and_then(|light_id| {
+                    let rgb = state.output.colors.iter().find(|c| c.id == light_id)?.rgb;
+                    Some((light_id, rgb))
+                });
+                assert_eq!(
+                    state
+                        .color(id)
+                        .map(|(light_id, rgb)| (light_id.into_owned(), rgb)),
+                    color
+                );
+            }
+        };
+        apply_and_compare(&config);
+        assert_eq!(
+            service.0.state.lock().unwrap().binding(second),
+            Some("office-light-bar")
+        );
+        let target = |light_id: &str| {
+            Some(control::Target {
+                light_id: light_id.into(),
+                address: "192.168.1.40:49600".parse().unwrap(),
+                session: [9; 16],
+            })
+        };
+        service
+            .0
+            .state
+            .lock()
+            .unwrap()
+            .devices
+            .get_mut(second)
+            .unwrap()
+            .connection
+            .target = target("office-light-bar");
+        // Unbind: the cache forgets the device and its obsolete target is discarded.
+        config.revision += 1;
+        config.rooms[1].lights[1].output = LightOutput::Virtual;
+        apply_and_compare(&config);
+        {
+            let state = service.0.state.lock().unwrap();
+            assert!(state.binding(second).is_none());
+            assert!(state.devices[second].connection.target.is_none());
+        }
+        // Rebind the same device to a different logical light in the other room.
+        config.revision += 1;
+        config.rooms[1].lights[2].output = LightOutput::Esp32 {
+            device_id: second.into(),
+        };
+        apply_and_compare(&config);
+        let mut state = service.0.state.lock().unwrap();
+        assert_eq!(state.binding(second), Some("office-light-strip"));
+        state.devices.get_mut(second).unwrap().connection.target = target("office-light-bar");
+        state.prune_targets();
+        assert!(state.devices[second].connection.target.is_none());
+        state.devices.get_mut(second).unwrap().connection.target = target("office-light-strip");
+        state.prune_targets();
+        assert!(state.devices[second].connection.target.is_some());
+        drop(state);
+        // An older revision cannot regress the cached bindings.
+        let mut stale = config.clone();
+        stale.revision -= 1;
+        stale.rooms[1].lights[2].output = LightOutput::Virtual;
+        service.apply_saved(stale);
+        assert_eq!(
+            service.0.state.lock().unwrap().binding(second),
+            Some("office-light-strip")
+        );
+    }
+
+    #[test]
     fn offline_binding_is_visible_even_without_output_frames() {
         let config: Configuration =
             serde_json::from_str(include_str!("../../../tests/fixtures/configuration.json"))
@@ -956,10 +1105,10 @@ mod tests {
         let id = device_id.clone();
         let logical_id = light.id.clone();
         let mut state = State {
-            config,
             output_available: true,
             ..State::default()
         };
+        state.set_config(config);
         state.devices.insert(id.clone(), Device::default());
         let view = &state.snapshot().devices[0];
         assert!(!view.online);
@@ -1244,10 +1393,10 @@ mod tests {
         let logical_id = light.id.clone();
         let now = Instant::now();
         let mut state = State {
-            config,
             last_publish: Some(now),
             ..Default::default()
         };
+        state.set_config(config);
         state.devices.insert(id.clone(), online_device());
         state.output.running = true;
         state.output.colors.push(engine::Color {
