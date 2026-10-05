@@ -1,5 +1,12 @@
 import { useState } from 'react';
-import { BOUNDS, ICON_KINDS, MAX_LIGHTS, type Position } from '../domain/model';
+import {
+  BOUNDS,
+  ICON_KINDS,
+  MAX_LIGHTS,
+  MAX_NAME_BYTES,
+  truncateName,
+  type Position,
+} from '../domain/model';
 import { useAppState, useStore } from '../state/context';
 import { RoomScene } from '../scene/RoomScene';
 import { Icon, LightIcon } from './Icons';
@@ -85,6 +92,7 @@ export function RoomEditor() {
   const room = state.draft!;
   const light = room.lights.find((item) => item.id === state.selectedLightId);
   const saving = state.saveStatus === 'saving';
+  const nameMissing = !!light && !light.name.trim();
   return (
     <section className="page rooms-page" aria-labelledby="rooms-title">
       <header className="page-heading">
@@ -246,13 +254,24 @@ export function RoomEditor() {
               <input
                 className="name-input"
                 id="light-name"
-                maxLength={64}
+                // UTF-16 length never exceeds UTF-8 bytes; truncateName
+                // enforces the byte limit for multi-byte text.
+                maxLength={MAX_NAME_BYTES}
                 value={light.name}
                 disabled={saving}
+                aria-invalid={nameMissing || undefined}
+                aria-describedby={nameMissing ? 'light-name-error' : undefined}
                 onChange={(event) =>
-                  store.updateLight(light.id, { name: event.target.value })
+                  store.updateLight(light.id, {
+                    name: truncateName(event.target.value),
+                  })
                 }
               />
+              {nameMissing && (
+                <p className="field-error" id="light-name-error">
+                  Enter a name before saving this room.
+                </p>
+              )}
               <div className="binding-control">
                 <PhysicalStatus light={light} />
                 {light.output.kind === 'esp32' ? (

@@ -116,6 +116,29 @@ describe('room editing UI', () => {
     ).not.toBeInTheDocument();
     expect(renamed).toHaveAttribute('aria-pressed', 'true');
   });
+  it('limits light names to 64 UTF-8 bytes and explains a missing name inline', async () => {
+    const { user, store } = await setup();
+    await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
+    await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
+    const input = screen.getByLabelText('Name');
+    const id = store.getSnapshot().selectedLightId!;
+    const name = () =>
+      store.getSnapshot().draft!.lights.find((light) => light.id === id)!.name;
+    expect(input).not.toHaveAttribute('aria-invalid');
+    await user.clear(input);
+    expect(input).toHaveAttribute('aria-invalid', 'true');
+    expect(input).toHaveAccessibleDescription(
+      'Enter a name before saving this room.',
+    );
+    await user.type(input, '   ');
+    expect(input).toHaveAttribute('aria-invalid', 'true');
+    await user.clear(input);
+    await user.paste('灯'.repeat(30));
+    expect(name()).toBe('灯'.repeat(21));
+    expect(input).toHaveValue('灯'.repeat(21));
+    expect(input).not.toHaveAttribute('aria-invalid');
+    expect(input).not.toHaveAccessibleDescription();
+  });
   it('saves via the keyboard, marks icon edits dirty and restores the saved card on confirmed discard', async () => {
     const { user, persistence } = await setup();
     await user.click(screen.getByRole('button', { name: 'Your Rooms' }));

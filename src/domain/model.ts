@@ -30,6 +30,7 @@ export type Configuration = {
 // One scene unit is one metre; origin = floor under the monitor centre.
 export const BOUNDS = { x: [-3, 3], y: [0.15, 3], z: [-0.7, 4] } as const;
 export const MAX_LIGHTS = 64;
+export const MAX_NAME_BYTES = 64;
 export const clone = <T>(value: T): T => structuredClone(value);
 
 export function defaultConfiguration(): Configuration {
@@ -39,6 +40,24 @@ export function defaultConfiguration(): Configuration {
     rooms: [{ id: 'studio', name: 'Studio', lights: [] }],
     preferences: { brightness: 75, intensity: 'balanced' },
   };
+}
+
+const nameEncoder = new TextEncoder();
+const utf8Length = (value: string) => nameEncoder.encode(value).length;
+
+// Keeps whole graphemes within MAX_NAME_BYTES of UTF-8, matching validation.
+export function truncateName(value: string): string {
+  if (utf8Length(value) <= MAX_NAME_BYTES) return value;
+  let result = '';
+  let bytes = 0;
+  for (const { segment } of new Intl.Segmenter(undefined, {
+    granularity: 'grapheme',
+  }).segment(value)) {
+    bytes += utf8Length(segment);
+    if (bytes > MAX_NAME_BYTES) break;
+    result += segment;
+  }
+  return result;
 }
 
 export function clampAxis(axis: keyof Position, value: number): number {
@@ -130,7 +149,7 @@ export function validateConfiguration(
   const name = (v: unknown) =>
     typeof v === 'string' &&
     v.trim().length > 0 &&
-    new TextEncoder().encode(v).length <= 64 &&
+    utf8Length(v) <= MAX_NAME_BYTES &&
     !Array.from(v).some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127);
   const id = (v: unknown) =>
     typeof v === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(v);

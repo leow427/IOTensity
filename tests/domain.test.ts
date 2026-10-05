@@ -8,6 +8,7 @@ import {
   defaultConfiguration,
   moveLight,
   roomIsDirty,
+  truncateName,
   validateConfiguration,
   type Configuration,
   type EditMode,
@@ -91,6 +92,30 @@ describe('shared configuration and coordinates', () => {
     const duplicate = clone(fixture);
     duplicate.rooms[0].lights[1].id = duplicate.rooms[0].lights[0].id;
     expect(() => validateConfiguration(duplicate)).toThrow('duplicate');
+  });
+  it('truncates names to whole graphemes within 64 UTF-8 bytes', () => {
+    const bytes = (value: string) => new TextEncoder().encode(value).length;
+    const accepts = (name: string) => {
+      const config = clone(fixture) as Configuration;
+      config.rooms[0].lights[0].name = name;
+      validateConfiguration(config);
+    };
+    expect(truncateName('Desk left')).toBe('Desk left');
+    expect(truncateName('a'.repeat(70))).toBe('a'.repeat(64));
+    // 21 three-byte CJK characters fit (63 bytes); the 22nd would not.
+    expect(truncateName('灯'.repeat(30))).toBe('灯'.repeat(21));
+    // A four-byte emoji (surrogate pair) at the boundary is dropped whole.
+    expect(truncateName(`${'a'.repeat(62)}💡`)).toBe('a'.repeat(62));
+    expect(truncateName(`${'a'.repeat(60)}💡b`)).toBe(`${'a'.repeat(60)}💡`);
+    // Multi-code-point graphemes are never split.
+    const family = '👨‍👩‍👧';
+    expect(truncateName(`${'a'.repeat(60)}${family}`)).toBe('a'.repeat(60));
+    for (const name of ['灯'.repeat(30), '💡'.repeat(20), family.repeat(5)]) {
+      const truncated = truncateName(name);
+      expect(bytes(truncated)).toBeLessThanOrEqual(64);
+      expect(truncated).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+      accepts(truncated);
+    }
   });
 });
 
