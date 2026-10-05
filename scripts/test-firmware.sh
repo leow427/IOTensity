@@ -2,7 +2,9 @@
 set -eu
 cd "$(dirname "$0")/.."
 mkdir -p .tooling
-${CXX:-c++} -std=c++17 -Wall -Wextra -Werror -Ifirmware/esp32/include firmware/esp32/test/protocol_test.cpp -o .tooling/firmware-protocol-test
+${CXX:-c++} -std=c++17 -Wall -Wextra -Werror ${CXXFLAGS:-} -Ifirmware/esp32/include firmware/esp32/test/protocol_test.cpp -o .tooling/firmware-protocol-test
 .tooling/firmware-protocol-test tests/fixtures/udp-v1.hex
-${CXX:-c++} -std=c++17 -Wall -Wextra -Werror -Ifirmware/esp32/include firmware/esp32/test/provisioning_test.cpp -o .tooling/firmware-provisioning-test
+${CXX:-c++} -std=c++17 -Wall -Wextra -Werror ${CXXFLAGS:-} -Ifirmware/esp32/include firmware/esp32/test/provisioning_test.cpp -o .tooling/firmware-provisioning-test
 .tooling/firmware-provisioning-test
+# Build the LAN emulator's receiver bridge the same way scripts/esp32-emulator.py does.
+${CXX:-c++} -std=c++17 -Wall -Wextra -Werror ${CXXFLAGS:-} -shared -fPIC -Ifirmware/esp32/include firmware/esp32/test/emulator_bridge.cpp -o .tooling/firmware-emulator-bridge.so

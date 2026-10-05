@@ -32,7 +32,7 @@ def receiver():
                     "-o", str(output)], cwd=ROOT, check=True)
     lib = ct.CDLL(str(output))
     lib.rgb_create.restype = ct.c_void_p
-    for name in ["rgb_destroy", "rgb_stop", "rgb_active", "rgb_accepted"]:
+    for name in ["rgb_stop", "rgb_active", "rgb_accepted"]:
         getattr(lib, name).argtypes = [ct.c_void_p]
     lib.rgb_accepted.restype = ct.c_uint32
     lib.rgb_expire.argtypes = [ct.c_void_p, ct.c_uint32]
@@ -66,7 +66,6 @@ class Emulator:
         self.offline_until = 0
         self.identifies = 0
         self.owner = None
-        self.arrivals = []
         self.closing = False
         self.udp_failed = False
         self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -101,9 +100,7 @@ class Emulator:
                     with self.lock:
                         if time.monotonic() < self.offline_until:
                             continue
-                        if self.lib.rgb_receive(self.stream, array(data), len(data), ip_number(peer[0]), self.now()):
-                            self.arrivals.append(time.monotonic())
-                            self.arrivals = self.arrivals[-120:]
+                        self.lib.rgb_receive(self.stream, array(data), len(data), ip_number(peer[0]), self.now())
                 except socket.timeout:
                     with self.lock:
                         self.lib.rgb_expire(self.stream, self.now())

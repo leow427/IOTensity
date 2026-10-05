@@ -15,11 +15,19 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { tauriSubcommand } from './signing.js';
 
+// CI providers set CI=true; an explicit CI=false or CI=0 is a local build.
+function isCi(env) {
+  const value = String(env.CI ?? '')
+    .trim()
+    .toLowerCase();
+  return value !== '' && value !== 'false' && value !== '0';
+}
+
 // Custom/test bundles and cross-compilation must never replace the everyday app.
 export function shouldInstallApp(platform, args, env = {}) {
   return (
     platform === 'darwin' &&
-    !env.CI &&
+    !isCi(env) &&
     tauriSubcommand(args) === 'build' &&
     args.filter((arg) => !/^(-v+|--verbose)$/.test(arg)).length === 1
   );
