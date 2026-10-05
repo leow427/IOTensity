@@ -20,7 +20,6 @@ export function LightCards({
   const elements = useRef(new Map<string, HTMLElement>());
   // Last painted color per element; remounted elements start unpainted.
   const painted = useRef(new WeakMap<HTMLElement, string>());
-  const row = useRef<HTMLDivElement>(null);
   useEffect(() => {
     let frame = 0;
     const paint = () => {
@@ -58,7 +57,6 @@ export function LightCards({
   return (
     <div
       className={`light-cards ${editable ? '' : 'light-cards-compact'}`}
-      ref={row}
       aria-label={
         lights[0]?.output.kind === 'esp32'
           ? 'Physical lights'

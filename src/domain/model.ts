@@ -96,7 +96,7 @@ export function createLight(
     position: {
       x: Math.round((-1.7 + (index % 5) * 0.85) * 100) / 100,
       y: 1.2,
-      z: 1 + ((Math.floor(index / 5) * 0.2) % 3),
+      z: 1 + Math.floor(index / 5) * 0.2,
     },
   };
 }
@@ -235,35 +235,4 @@ export function validateConfiguration(
     fail('Brightness must be a whole number from 0 to 100.');
   if (!INTENSITIES.includes(prefs.intensity as Intensity))
     fail('Unknown intensity.');
-}
-
-// Migration is in memory. Only an acknowledged save replaces a legacy file.
-export function migrateConfiguration(value: unknown): Configuration {
-  const migrated = clone(value);
-  if (
-    migrated &&
-    typeof migrated === 'object' &&
-    'schemaVersion' in migrated &&
-    migrated.schemaVersion === 1
-  ) {
-    const legacy = migrated as Record<string, unknown>;
-    if (!Array.isArray(legacy.rooms)) throw new Error('Invalid legacy rooms.');
-    for (const room of legacy.rooms) {
-      if (!room || !Array.isArray(room.lights))
-        throw new Error('Invalid legacy room.');
-      for (const light of room.lights) {
-        if (
-          !light ||
-          typeof light !== 'object' ||
-          Array.isArray(light) ||
-          'output' in light
-        )
-          throw new Error('Invalid legacy light.');
-        light.output = { kind: 'virtual' };
-      }
-    }
-    legacy.schemaVersion = SCHEMA_VERSION;
-  }
-  validateConfiguration(migrated);
-  return migrated;
 }

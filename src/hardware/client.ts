@@ -26,7 +26,7 @@ export interface NativeTransport {
   invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
   listen<T>(event: string, callback: (payload: T) => void): Promise<UnlistenFn>;
 }
-export const nativeTransport: NativeTransport = {
+const nativeTransport: NativeTransport = {
   invoke,
   listen: <T>(event: string, callback: (payload: T) => void) =>
     listen<T>(event, ({ payload }) => callback(payload)),

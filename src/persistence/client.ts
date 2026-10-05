@@ -22,7 +22,7 @@ export function errorMessage(error: unknown): string {
     typeof error.message === 'string'
   )
     return error.message;
-  return 'The configuration could not be saved. Check your application data folder permissions and try again.';
+  return 'Something went wrong. Please try again.';
 }
 
 export class NativePersistence implements Persistence {

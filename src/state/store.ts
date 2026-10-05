@@ -486,7 +486,7 @@ export class AppStore {
     } catch (error) {
       this.set({
         syncStatus: 'error',
-        syncMessage: typeof error === 'string' ? error : errorMessage(error),
+        syncMessage: errorMessage(error),
       });
     } finally {
       this.set({ syncBusy: false });
@@ -501,7 +501,7 @@ export class AppStore {
     } catch (error) {
       this.set({
         syncStatus: 'error',
-        syncMessage: typeof error === 'string' ? error : errorMessage(error),
+        syncMessage: errorMessage(error),
       });
     } finally {
       this.set({ syncBusy: false });
