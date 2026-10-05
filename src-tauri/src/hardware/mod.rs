@@ -81,6 +81,11 @@ impl State {
             .find(|c| c.id == light_id)
             .map(|c| (light_id, c.rgb))
     }
+    // Sync (any source, including virtual-only rooms) or a physical placement
+    // preview needs steady native timing; stopped/expired output does not.
+    fn needs_activity(&self) -> bool {
+        self.output.running || self.preview.is_some()
+    }
     fn prune_targets(&mut self) {
         let desired: HashMap<_, _> = self
             .devices
@@ -370,13 +375,15 @@ impl HardwareService {
         let clock = Instant::now();
         let mut output = output::SocketRecovery::default();
         let mut sequences: HashMap<String, (protocol::Session, u32)> = HashMap::new();
+        // Dropped when this loop ends at shutdown.
+        let mut activity = crate::activity::Activity::default();
         while !self.is_shutdown() {
             output.poll(clock.elapsed().as_millis() as u64, || {
                 let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
                 socket.set_nonblocking(true)?;
                 Ok(socket)
             });
-            let targets = {
+            let (targets, active) = {
                 let mut state = self.0.state.lock().unwrap();
                 state.output_available = output.socket.is_some();
                 state.output_error = output.error.clone();
@@ -384,7 +391,7 @@ impl HardwareService {
                 // Keep the sequence through a transient control failure that may
                 // recover the same session via an idempotent start retry.
                 sequences.retain(|id, _| state.devices.contains_key(id));
-                state
+                let targets = state
                     .devices
                     .iter()
                     .filter_map(|(id, device)| {
@@ -392,8 +399,10 @@ impl HardwareService {
                         let (light_id, rgb) = state.color(id)?;
                         (target.light_id == light_id).then(|| (id.clone(), target, rgb))
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                (targets, state.needs_activity())
             };
+            activity.set(active);
             if let Some(socket) = &output.socket {
                 for (id, target, rgb) in targets {
                     let entry = sequences.entry(id).or_insert((target.session, 0));
@@ -816,6 +825,7 @@ mod tests {
             .unwrap();
         let wish = state.wish(id).unwrap();
         assert!(wish.running);
+        assert!(state.needs_activity()); // App Nap must not throttle the preview.
         assert!(!state.wish(other).unwrap().running);
         assert_eq!(state.color(id).unwrap().1, [64, 232, 135]);
         state
@@ -831,6 +841,7 @@ mod tests {
         assert!(state.color(id).is_none());
         assert_eq!(state.config, saved);
         assert!(!state.output.running);
+        assert!(!state.needs_activity());
     }
 
     #[test]
@@ -899,6 +910,7 @@ mod tests {
             rgb: [10, 20, 30],
         });
         let saved = state.config.clone();
+        assert!(state.needs_activity());
         let before = state.wish(&id).unwrap();
         state
             .set_preview(Some(preview_request(&id, -3.0)), now)
@@ -917,7 +929,9 @@ mod tests {
             .unwrap();
         state.expire(end + Duration::from_millis(251));
         assert!(!state.output.running);
+        assert!(state.needs_activity()); // The preview lease still holds it.
         state.expire(end + preview::PREVIEW_DURATION);
         assert!(state.color(&id).is_none());
+        assert!(!state.needs_activity());
     }
 }

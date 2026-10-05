@@ -1,3 +1,4 @@
+mod activity;
 pub mod config;
 pub mod hardware;
 mod overlay;
