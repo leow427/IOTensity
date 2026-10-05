@@ -1049,7 +1049,11 @@ input.range-z {
   white-space: nowrap;
   color: #8d4b2c;
 }
-.preference-error {
+.error-banner .text-button + .text-button {
+  margin-left: 0;
+}
+.preference-error,
+.close-error {
   margin: 20px 30px 0;
 }
 .app-message {
