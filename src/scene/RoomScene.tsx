@@ -157,6 +157,10 @@ function DemandFrames({ output }: { output: SyncOutput }) {
   return null;
 }
 
+// Damping keeps 0.88 of the momentum per frame, so this many frames reduce
+// it below a millionth, as continuous rendering once did.
+const SETTLE_FRAMES = 120;
+
 function CameraControl({
   dragging,
   resetKey,
@@ -167,6 +171,7 @@ function CameraControl({
   const { camera, gl, size, get, invalidate } = useThree();
   const controls = useMemo(() => new OrbitControls(camera), [camera]);
   const fittedZoom = useRef(0);
+  const settleFrames = useRef(0);
   useEffect(() => {
     // Bind listeners in the effect so React's development remounts reconnect
     // cleanly, without side effects from a discarded render.
@@ -174,7 +179,15 @@ function CameraControl({
     // Orbit, zoom and each damping step emit `change` from update(); a frame
     // requested during useFrame keeps the demand loop alive until damping settles.
     const change = () => invalidate();
+    // A camera clamped at an orbit limit stops emitting `change` while damping
+    // momentum remains; keep a bounded run of frames after each gesture so it
+    // drains instead of replaying into the next orbit or Reset view.
+    const end = () => {
+      settleFrames.current = SETTLE_FRAMES;
+      invalidate();
+    };
     controls.addEventListener('change', change);
+    controls.addEventListener('end', end);
     controls.enablePan = false;
     controls.enableDamping = true;
     controls.dampingFactor = 0.12;
@@ -186,6 +199,7 @@ function CameraControl({
     controls.maxZoom = 130;
     return () => {
       controls.removeEventListener('change', change);
+      controls.removeEventListener('end', end);
       controls.dispose();
     };
   }, [controls, gl, invalidate]);
@@ -194,6 +208,13 @@ function CameraControl({
   }, [controls, dragging]);
   // The full view resets only on mount and explicit Reset view.
   useEffect(() => {
+    // Discard pending damping momentum: without damping, update() applies and
+    // then clears it, so the pose below is not followed by leftover rotation.
+    const damping = controls.enableDamping;
+    controls.enableDamping = false;
+    controls.update();
+    controls.enableDamping = damping;
+    settleFrames.current = 0;
     const { width, height } = get().size;
     camera.position.set(7.4, 6.8, 9);
     if (camera instanceof OrthographicCamera) {
@@ -215,7 +236,13 @@ function CameraControl({
     }
     if (fit > 0) fittedZoom.current = fit;
   }, [camera, invalidate, size.width, size.height]);
-  useFrame(() => controls.update());
+  useFrame(() => {
+    controls.update();
+    if (settleFrames.current > 0) {
+      settleFrames.current -= 1;
+      invalidate();
+    }
+  });
   return null;
 }
 
