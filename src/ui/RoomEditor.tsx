@@ -25,6 +25,18 @@ function CoordinateControl({
   onChange: (value: number) => void;
   disabled: boolean;
 }) {
+  // The typed text stays local while editing so partial entries such as "0",
+  // "-" or "" are not clamped mid-keystroke. In-range numbers update the
+  // draft live; blur and Enter commit through the store's shared clamp.
+  const [text, setText] = useState<string | null>(null);
+  if (disabled && text !== null) setText(null);
+  const [min, max] = BOUNDS[axis];
+  const commit = () => {
+    if (text === null) return;
+    const parsed = text.trim() === '' ? Number.NaN : Number(text);
+    if (Number.isFinite(parsed)) onChange(parsed);
+    setText(null);
+  };
   return (
     <div className="coordinate-control">
       <div className="coordinate-heading">
@@ -36,17 +48,25 @@ function CoordinateControl({
           <input
             aria-label={`${AXIS_LABELS[axis]} coordinate`}
             type="number"
-            min={BOUNDS[axis][0]}
-            max={BOUNDS[axis][1]}
+            min={min}
+            max={max}
             step="0.01"
-            value={value}
+            value={text ?? value}
             disabled={disabled}
             onChange={(event) => {
+              const next = event.target.valueAsNumber;
+              setText(event.target.value);
               if (
                 event.target.value !== '' &&
-                Number.isFinite(event.target.valueAsNumber)
+                Number.isFinite(next) &&
+                next >= min &&
+                next <= max
               )
-                onChange(event.target.valueAsNumber);
+                onChange(next);
+            }}
+            onBlur={commit}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') commit();
             }}
           />
           <span>m</span>
@@ -370,7 +390,7 @@ export function RoomEditor() {
                   : (['y'] as const)
                 ).map((axis) => (
                   <CoordinateControl
-                    key={axis}
+                    key={`${light.id}-${axis}`}
                     axis={axis}
                     value={light.position[axis]}
                     disabled={saving}

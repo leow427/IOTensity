@@ -139,6 +139,51 @@ describe('room editing UI', () => {
     ).toBeInTheDocument();
     expect(screen.queryByText('● UNSAVED CHANGES')).not.toBeInTheDocument();
   });
+  it('lets coordinates be typed through partial out-of-range values and clamps on commit', async () => {
+    const { user, store } = await setup();
+    await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
+    await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
+    const id = store.getSnapshot().selectedLightId!;
+    const position = () =>
+      store.getSnapshot().draft!.lights.find((light) => light.id === id)!
+        .position;
+    const before = position();
+    await user.click(screen.getByRole('tab', { name: 'Height' }));
+    const height = screen.getByLabelText('Height coordinate');
+    await user.clear(height);
+    await user.type(height, '0');
+    // "0" is below the floor: kept as typed, not clamped to 0.15 mid-entry.
+    expect(height).toHaveValue(0);
+    expect(position().y).toBe(before.y);
+    await user.type(height, '.5');
+    expect(height).toHaveValue(0.5);
+    expect(position()).toEqual({ ...before, y: 0.5 });
+    await user.tab();
+    expect(height).toHaveValue(0.5);
+
+    await user.clear(height);
+    await user.type(height, '9');
+    expect(position().y).toBe(0.5);
+    await user.tab();
+    expect(position()).toEqual({ ...before, y: 3 });
+    expect(height).toHaveValue(3);
+
+    await user.clear(height);
+    await user.type(height, '0.01{Enter}');
+    expect(position().y).toBe(0.15);
+    expect(height).toHaveValue(0.15);
+    expect(height).toHaveFocus();
+    await user.clear(height);
+    await user.tab();
+    expect(height).toHaveValue(0.15);
+
+    await user.click(screen.getByRole('tab', { name: 'Location' }));
+    const x = screen.getByLabelText('Left / right coordinate');
+    await user.clear(x);
+    await user.type(x, '-1.25');
+    expect(x).toHaveValue(-1.25);
+    expect(position()).toEqual({ ...before, x: -1.25, y: 0.15 });
+  });
   it('uses an accessible navigation dialog and displays failed saves with the draft intact', async () => {
     const { user, persistence } = await setup();
     await user.click(screen.getByRole('button', { name: 'Your Rooms' }));

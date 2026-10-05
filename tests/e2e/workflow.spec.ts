@@ -138,3 +138,32 @@ test('browser preview: renders WebGL and orbits without changing room data', asy
   await expect(page.getByRole('status')).not.toContainText('UNSAVED');
   expect(errors).toEqual([]);
 });
+
+test('coordinate inputs accept keystroke typing and clamp arrow steps', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Your Rooms' }).click();
+  await page.getByRole('button', { name: 'Add virtual light' }).click();
+  await page.getByRole('tab', { name: 'Height' }).click();
+  const height = page.getByLabel('Height coordinate', { exact: true });
+  await height.selectText();
+  await height.pressSequentially('0.5');
+  await expect(height).toHaveValue('0.5');
+  await height.press('Tab');
+  await expect(height).toHaveValue('0.5');
+  await height.selectText();
+  await height.pressSequentially('2.99');
+  await height.press('ArrowUp');
+  await height.press('ArrowUp');
+  await expect(height).toHaveValue('3');
+  await page.getByRole('tab', { name: 'Location' }).click();
+  const x = page.getByLabel('Left / right coordinate', { exact: true });
+  await x.selectText();
+  await x.pressSequentially('-1.5');
+  await expect(x).toHaveValue('-1.5');
+  await x.press('Enter');
+  await expect(x).toHaveValue('-1.5');
+  await page.getByRole('tab', { name: 'Height' }).click();
+  await expect(height).toHaveValue('3');
+});
