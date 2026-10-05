@@ -1,10 +1,12 @@
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
-import { MiniRoomScene } from '../src/ui/MiniRoom';
+import { act, cleanup, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it } from 'vitest';
+import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
+import { emit } from '@tauri-apps/api/event';
+import { MiniRoom, MiniRoomScene } from '../src/ui/MiniRoom';
 import { LightCards } from '../src/ui/LightCards';
 import { StoreProvider } from '../src/state/context';
 import { AppStore } from '../src/state/store';
-import { clone, type Room } from '../src/domain/model';
+import { clone, type Configuration, type Room } from '../src/domain/model';
 import fixture from './fixtures/configuration.json';
 import { FakeOutput, MemoryPersistence } from './helpers';
 
@@ -55,6 +57,78 @@ describe('read-only mini room geometry', () => {
       Number(container.querySelector('circle')!.getAttribute('cy')),
     ).toBeLessThan(Number(before));
     expect(room.lights[0].position.y).toBe(1.2);
+    unmount();
+    output.dispose();
+  });
+});
+
+describe('mini room saved-configuration listener', () => {
+  // Unmount (and unlisten) before the mocked event plugin is cleared.
+  afterEach(() => {
+    cleanup();
+    clearMocks();
+  });
+  const saved = (revision: number, name: string) => {
+    const config = clone(fixture) as Configuration;
+    config.revision = revision;
+    config.rooms[0].name = name;
+    return config;
+  };
+  const mount = async (load: () => unknown) => {
+    mockIPC(
+      (command) => {
+        if (command === 'load_config') return load();
+        throw new Error(`Unexpected command ${command}`);
+      },
+      { shouldMockEvents: true },
+    );
+    const output = new FakeOutput();
+    const view = render(<MiniRoom output={output} />);
+    await act(async () => {});
+    return { ...view, output };
+  };
+  const publish = (config: unknown) =>
+    act(() => emit('configuration-saved', config));
+
+  it('clears a load failure when a newer valid configuration is saved', async () => {
+    const { unmount, output } = await mount(() => {
+      throw new Error('Configuration is unreadable.');
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Configuration is unreadable.',
+    );
+    await publish(saved(1, 'Recovered'));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByText('Recovered')).toBeInTheDocument();
+    expect(screen.getByRole('img')).toHaveAccessibleName(
+      /live native light colors/,
+    );
+    unmount();
+    output.dispose();
+  });
+
+  it('ignores an invalid event payload and keeps the last valid room', async () => {
+    const { container, unmount, output } = await mount(() => saved(2, 'Kept'));
+    expect(screen.getByText('Kept')).toBeInTheDocument();
+    await expect(
+      publish({ ...saved(3, 'Broken'), schemaVersion: 4 }),
+    ).resolves.toBeUndefined();
+    await publish({ revision: 4 });
+    expect(screen.getByText('Kept')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(container.querySelectorAll('circle')).toHaveLength(
+      fixture.rooms[0].lights.length,
+    );
+    unmount();
+    output.dispose();
+  });
+
+  it('ignores an older revision after a newer saved room arrives', async () => {
+    const { unmount, output } = await mount(() => saved(5, 'Loaded'));
+    await publish(saved(6, 'Newest'));
+    await publish(saved(4, 'Stale'));
+    expect(screen.getByText('Newest')).toBeInTheDocument();
+    expect(screen.queryByText('Stale')).not.toBeInTheDocument();
     unmount();
     output.dispose();
   });
