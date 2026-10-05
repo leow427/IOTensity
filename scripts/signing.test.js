@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { chooseIdentity, isMacBundle, parseIdentities } from './signing.js';
+import {
+  chooseIdentity,
+  isMacBundle,
+  parseIdentities,
+  requestedIdentity,
+} from './signing.js';
 
 const development = {
   fingerprint: 'A'.repeat(40),
@@ -49,6 +54,27 @@ test('never silently replaces a missing identity or falls back to ad hoc signing
     () => chooseIdentity([development, distribution]),
     /more than one/,
   );
+});
+
+test('treats an empty signing override as unset so the pin still applies', () => {
+  for (const override of ['', '   ', undefined]) {
+    const requested = requestedIdentity(override, development.fingerprint);
+    assert.equal(requested, development.fingerprint);
+    assert.equal(
+      chooseIdentity([development, distribution], requested),
+      development,
+    );
+    // A single other installed certificate must not replace a missing pin.
+    assert.throws(
+      () => chooseIdentity([distribution], requested),
+      /unavailable/,
+    );
+  }
+  assert.equal(
+    requestedIdentity(` ${distribution.name} `, development.fingerprint),
+    distribution.name,
+  );
+  assert.equal(requestedIdentity('', undefined), undefined);
 });
 
 test('requires signing for macOS bundles while preserving portable CI compilation and help', () => {
