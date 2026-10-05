@@ -44,6 +44,14 @@ bool parse_token(const char* text, Token& token) {
   }
   return true;
 }
+// Bodies are read by ControlHandler, never by WebServer, which would heap-buffer any
+// declared Content-Length and wait up to 5 s for it before a handler could reject it.
+constexpr size_t kMaxBody = 512;
+constexpr uint32_t kBodyWaitMs = 1000;
+char request_body[kMaxBody + 1];
+size_t request_length = 0;
+bool request_valid = false;
+
 void status() {
   StaticJsonDocument<512> json;
   json["deviceId"] = device_id;
@@ -63,7 +71,7 @@ void status() {
 }
 bool body(StaticJsonDocument<512>& json) {
   if (http.header("Origin").length() || http.header("Content-Type") != "application/json" ||
-      http.arg("plain").length() > 512 || deserializeJson(json, http.arg("plain")) ||
+      !request_valid || deserializeJson(json, static_cast<const char*>(request_body), request_length) ||
       !json["deviceId"].is<const char*>() || json["deviceId"].as<String>() != device_id) {
     http.send(400, "application/json", "{\"error\":\"invalid request\"}"); return false;
   }
@@ -103,6 +111,48 @@ void identify() {
   { Guard guard; stream.identify(millis()); }
   status();
 }
+
+// Owns every method for which Arduino-ESP32 2.x WebServer reads a body. Its raw hook runs
+// after the headers: an oversized or negative Content-Length is refused unread, and an
+// accepted body has a total deadline instead of WebServer's per-byte waits.
+class ControlHandler : public RequestHandler {
+ public:
+  bool canHandle(HTTPMethod method, String) override {
+    return method == HTTP_POST || method == HTTP_PUT || method == HTTP_PATCH || method == HTTP_DELETE;
+  }
+  bool canRaw(String) override { return true; }
+  void raw(WebServer& server, String, HTTPRaw& state) override {
+    if (state.status != RAW_START) return;
+    request_length = 0; request_valid = false;
+    const int length = server.clientContentLength();
+    if (length >= 0 && size_t(length) <= kMaxBody) {
+      WiFiClient client = server.client();
+      const uint32_t started = millis();
+      while (request_length < size_t(length) && millis() - started < kBodyWaitMs) {
+        const int read = client.available() > 0
+            ? client.read(reinterpret_cast<uint8_t*>(request_body) + request_length, size_t(length) - request_length)
+            : 0;
+        if (read > 0) request_length += read;
+        else if (!client.connected()) break;
+        else delay(1);
+      }
+      request_valid = request_length == size_t(length);
+    }
+    request_body[request_length] = '\0';
+    // WebServer keeps reading until totalSize reaches Content-Length; mark the body
+    // consumed so it neither buffers nor waits for the remainder.
+    state.totalSize = SIZE_MAX;
+  }
+  bool handle(WebServer& server, HTTPMethod method, String uri) override {
+    if (method == HTTP_POST && uri == "/v1/identify") identify();
+    else if (method == HTTP_POST && uri == "/v1/stream/start") start_stream();
+    else if (method == HTTP_POST && uri == "/v1/stream/stop") stop_stream();
+    else server.send(404, "application/json", "{}");
+    request_valid = false;
+    return true;
+  }
+};
+ControlHandler control_handler;
 
 // UDP/PWM has its own task, so a slow HTTP client or serial provisioning cannot
 // block valid frames, timeout safety or the Identify animation.
@@ -186,9 +236,7 @@ void setup() {
   if (xTaskCreate(output_task, "rgb-output", 4096, nullptr, 2, nullptr) != pdPASS) abort();
   const char* headers[] = {"Origin", "Content-Type"}; http.collectHeaders(headers, 2);
   http.on("/v1/info", HTTP_GET, status); http.on("/v1/status", HTTP_GET, status);
-  http.on("/v1/identify", HTTP_POST, identify);
-  http.on("/v1/stream/start", HTTP_POST, start_stream);
-  http.on("/v1/stream/stop", HTTP_POST, stop_stream);
+  http.addHandler(&control_handler);
   http.onNotFound([] { http.send(404, "application/json", "{}"); });
   if (!preferences.begin("wifi", false)) { Serial.println("Cannot open Wi-Fi settings storage."); abort(); }
   StaticJsonDocument<384> settings;
