@@ -6,6 +6,7 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <esp_system.h>
+#include <esp_wifi.h>
 #include <esp_efuse.h>
 #include "stream_protocol.h"
 
@@ -153,7 +154,10 @@ void provision_serial() {
     bool valid = !overflow && !deserializeJson(json, line);
     line = ""; overflow = false;
     if (valid && json["reset"] == true) {
-      preferences.clear(); Serial.println("Wi-Fi settings cleared. Restarting."); ESP.restart();
+      preferences.clear();
+      // Older firmware let the driver persist credentials; overwrite its flash copy too.
+      esp_wifi_set_storage(WIFI_STORAGE_FLASH); WiFi.disconnect(true, true);
+      Serial.println("Wi-Fi settings cleared. Restarting."); Serial.flush(); ESP.restart();
     }
     valid = valid && json["ssid"].is<const char*>() && json["password"].is<const char*>();
     const String ssid = json["ssid"] | "";
@@ -197,6 +201,7 @@ void setup() {
     configured_ssid = settings["ssid"] | "";
     configured_password = settings["password"] | "";
   }
+  WiFi.persistent(false); // The `wifi` namespace is the only credential store.
   WiFi.mode(WIFI_STA); WiFi.setHostname(hostname.c_str()); WiFi.setAutoReconnect(true);
   WiFi.setSleep(false); // Powered prototype: avoid modem sleep latency, including discovery.
   if (configured_ssid.length()) WiFi.begin(configured_ssid.c_str(), configured_password.c_str());
