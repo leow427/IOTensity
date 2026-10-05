@@ -23,6 +23,9 @@ use std::{
 
 pub const SERVICE: &str = "_iotensity._tcp.local.";
 pub const FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 30 + 1);
+/// Pause before recreating an mDNS daemon that could not be created or browse.
+const DISCOVERY_RETRY_DELAY: Duration = Duration::from_secs(2);
+const DAEMON_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 type IdentifyReply = mpsc::SyncSender<Result<(), String>>;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -423,9 +426,7 @@ impl HardwareService {
             let daemon = match ServiceDaemon::new() {
                 Ok(daemon) => daemon,
                 Err(error) => {
-                    self.0.state.lock().unwrap().discovery_error = Some(error.to_string());
-                    publish(self.devices());
-                    thread::sleep(Duration::from_secs(2));
+                    self.discovery_failed(error.to_string(), &publish);
                     continue;
                 }
             };
@@ -434,8 +435,9 @@ impl HardwareService {
             let mut events = match daemon.browse(SERVICE) {
                 Ok(events) => events,
                 Err(error) => {
-                    self.0.state.lock().unwrap().discovery_error = Some(error.to_string());
-                    let _ = daemon.shutdown();
+                    // A dead daemon fails every browse; back off instead of spinning.
+                    stop_daemon(&daemon);
+                    self.discovery_failed(error.to_string(), &publish);
                     continue;
                 }
             };
@@ -553,10 +555,13 @@ impl HardwareService {
                     previous = Some(snapshot);
                 }
             }
-            if let Ok(stopped) = daemon.shutdown() {
-                let _ = stopped.recv_timeout(Duration::from_secs(1));
-            }
+            stop_daemon(&daemon);
         }
+    }
+    fn discovery_failed(&self, error: String, publish: &impl Fn(DevicesSnapshot)) {
+        self.0.state.lock().unwrap().discovery_error = Some(error);
+        publish(self.devices());
+        wait_unless_shutdown(&self.0.shutdown, DISCOVERY_RETRY_DELAY);
     }
     fn device_loop(&self, id: String) {
         let control = match HttpControl::new() {
@@ -596,6 +601,25 @@ impl HardwareService {
             thread::sleep(Duration::from_millis(50));
         }
         connection.close(&control);
+    }
+}
+
+/// Bounded: a wedged daemon thread must not stall discovery or app shutdown.
+fn stop_daemon(daemon: &ServiceDaemon) {
+    if let Ok(stopped) = daemon.shutdown() {
+        let _ = stopped.recv_timeout(DAEMON_SHUTDOWN_TIMEOUT);
+    }
+}
+
+/// Sleep for `delay`, returning early once `shutdown` is set.
+fn wait_unless_shutdown(shutdown: &AtomicBool, delay: Duration) {
+    let deadline = Instant::now() + delay;
+    while !shutdown.load(Ordering::Acquire) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        thread::sleep(remaining.min(Duration::from_millis(100)));
     }
 }
 
@@ -919,5 +943,52 @@ mod tests {
         assert!(!state.output.running);
         state.expire(end + preview::PREVIEW_DURATION);
         assert!(state.color(&id).is_none());
+    }
+
+    fn idle_service() -> HardwareService {
+        HardwareService(Arc::new(Inner {
+            state: Mutex::new(State::default()),
+            shutdown: AtomicBool::new(false),
+            retry_discovery: AtomicBool::new(false),
+            client_id: "test".into(),
+        }))
+    }
+
+    #[test]
+    fn discovery_failure_publishes_error_and_waits_before_retrying() {
+        let service = idle_service();
+        let published = Mutex::new(Vec::new());
+        let start = Instant::now();
+        service.discovery_failed("browse failed".into(), &|snapshot| {
+            published.lock().unwrap().push(snapshot)
+        });
+        assert!(start.elapsed() >= DISCOVERY_RETRY_DELAY);
+        let published = published.into_inner().unwrap();
+        assert_eq!(published.len(), 1);
+        assert_eq!(
+            published[0].discovery_error.as_deref(),
+            Some("browse failed")
+        );
+    }
+
+    #[test]
+    fn discovery_retry_wait_ends_promptly_on_shutdown() {
+        let service = idle_service();
+        service.shutdown();
+        let start = Instant::now();
+        service.discovery_failed("daemon failed".into(), &|_| {});
+        assert!(start.elapsed() < Duration::from_millis(500));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let waiter = {
+            let shutdown = shutdown.clone();
+            thread::spawn(move || {
+                let start = Instant::now();
+                wait_unless_shutdown(&shutdown, Duration::from_secs(30));
+                start.elapsed()
+            })
+        };
+        thread::sleep(Duration::from_millis(50));
+        shutdown.store(true, Ordering::Release);
+        assert!(waiter.join().unwrap() < Duration::from_secs(5));
     }
 }
