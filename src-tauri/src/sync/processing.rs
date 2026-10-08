@@ -3,6 +3,11 @@ use serde::Serialize;
 
 pub const OUTPUT_INTERVAL: std::time::Duration = std::time::Duration::from_nanos(33_333_333);
 const ANALYSIS_MAX_SIDE: usize = 256;
+/// Longest side of the frame ScreenCaptureKit scales the display to on the GPU
+/// (never upscaled). Four capture pixels per analysis pixel on each axis keep
+/// small vivid details for the chroma weight; decoding stays a few milliseconds.
+pub const CAPTURE_MAX_SIDE: usize = 1024;
+const _: () = assert!(CAPTURE_MAX_SIDE >= 4 * ANALYSIS_MAX_SIDE);
 const SAMPLE_RADIUS: f64 = 0.1;
 const CHROMA_BOOST: f32 = 3.0;
 
