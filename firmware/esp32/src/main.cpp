@@ -6,13 +6,16 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <esp_system.h>
+#include <esp_wifi.h>
 #include <esp_efuse.h>
 #include "stream_protocol.h"
+#include "wifi_credentials.h"
 
 using namespace iotensity;
 constexpr uint16_t kHttpPort = 80;
 constexpr uint16_t kUdpPort = 49600;
 constexpr uint32_t kPwmHz = 20000;
+constexpr uint32_t kServiceRetryMs = 5000;
 const uint8_t kPins[] = {IOT_RED_PIN, IOT_GREEN_PIN, IOT_BLUE_PIN};
 WebServer http(kHttpPort);
 Preferences preferences;
@@ -20,6 +23,10 @@ SemaphoreHandle_t stream_lock;
 iotensity::Stream stream;
 String device_id, hostname, configured_ssid, configured_password;
 bool connected = false;
+// Forced Wi-Fi reconnects start after a slow association plus several lwIP DHCP retries
+// (2/4/8 s apart) and double up to the cap; a successful connection resets the delay.
+constexpr uint32_t kWifiRetryInitialMs = 15000;
+constexpr uint32_t kWifiRetryMaxMs = 60000;
 
 class Guard {
  public:
@@ -44,6 +51,14 @@ bool parse_token(const char* text, Token& token) {
   }
   return true;
 }
+// Bodies are read by ControlHandler, never by WebServer, which would heap-buffer any
+// declared Content-Length and wait up to 5 s for it before a handler could reject it.
+constexpr size_t kMaxBody = 512;
+constexpr uint32_t kBodyWaitMs = 1000;
+char request_body[kMaxBody + 1];
+size_t request_length = 0;
+bool request_valid = false;
+
 void status() {
   StaticJsonDocument<512> json;
   json["deviceId"] = device_id;
@@ -63,7 +78,7 @@ void status() {
 }
 bool body(StaticJsonDocument<512>& json) {
   if (http.header("Origin").length() || http.header("Content-Type") != "application/json" ||
-      http.arg("plain").length() > 512 || deserializeJson(json, http.arg("plain")) ||
+      !request_valid || deserializeJson(json, static_cast<const char*>(request_body), request_length) ||
       !json["deviceId"].is<const char*>() || json["deviceId"].as<String>() != device_id) {
     http.send(400, "application/json", "{\"error\":\"invalid request\"}"); return false;
   }
@@ -103,6 +118,48 @@ void identify() {
   { Guard guard; stream.identify(millis()); }
   status();
 }
+
+// Owns every method for which Arduino-ESP32 2.x WebServer reads a body. Its raw hook runs
+// after the headers: an oversized or negative Content-Length is refused unread, and an
+// accepted body has a total deadline instead of WebServer's per-byte waits.
+class ControlHandler : public RequestHandler {
+ public:
+  bool canHandle(HTTPMethod method, String) override {
+    return method == HTTP_POST || method == HTTP_PUT || method == HTTP_PATCH || method == HTTP_DELETE;
+  }
+  bool canRaw(String) override { return true; }
+  void raw(WebServer& server, String, HTTPRaw& state) override {
+    if (state.status != RAW_START) return;
+    request_length = 0; request_valid = false;
+    const int length = server.clientContentLength();
+    if (length >= 0 && size_t(length) <= kMaxBody) {
+      WiFiClient client = server.client();
+      const uint32_t started = millis();
+      while (request_length < size_t(length) && millis() - started < kBodyWaitMs) {
+        const int read = client.available() > 0
+            ? client.read(reinterpret_cast<uint8_t*>(request_body) + request_length, size_t(length) - request_length)
+            : 0;
+        if (read > 0) request_length += read;
+        else if (!client.connected()) break;
+        else delay(1);
+      }
+      request_valid = request_length == size_t(length);
+    }
+    request_body[request_length] = '\0';
+    // WebServer keeps reading until totalSize reaches Content-Length; mark the body
+    // consumed so it neither buffers nor waits for the remainder.
+    state.totalSize = SIZE_MAX;
+  }
+  bool handle(WebServer& server, HTTPMethod method, String uri) override {
+    if (method == HTTP_POST && uri == "/v1/identify") identify();
+    else if (method == HTTP_POST && uri == "/v1/stream/start") start_stream();
+    else if (method == HTTP_POST && uri == "/v1/stream/stop") stop_stream();
+    else server.send(404, "application/json", "{}");
+    request_valid = false;
+    return true;
+  }
+};
+ControlHandler control_handler;
 
 // UDP/PWM has its own task, so a slow HTTP client or serial provisioning cannot
 // block valid frames, timeout safety or the Identify animation.
@@ -153,13 +210,20 @@ void provision_serial() {
     bool valid = !overflow && !deserializeJson(json, line);
     line = ""; overflow = false;
     if (valid && json["reset"] == true) {
-      preferences.clear(); Serial.println("Wi-Fi settings cleared. Restarting."); ESP.restart();
+      preferences.clear();
+      // Older firmware let the driver persist credentials; overwrite its flash copy too.
+      esp_wifi_set_storage(WIFI_STORAGE_FLASH); WiFi.disconnect(true, true);
+      Serial.println("Wi-Fi settings cleared. Restarting."); Serial.flush(); ESP.restart();
     }
     valid = valid && json["ssid"].is<const char*>() && json["password"].is<const char*>();
     const String ssid = json["ssid"] | "";
     const String password = json["password"] | "";
-    if (!valid || ssid.length() < 1 || ssid.length() > 32 || password.length() > 63) {
+    if (!valid || !valid_wifi_ssid(ssid.length())) {
       Serial.println("Invalid provisioning message."); continue;
+    }
+    if (!valid_wifi_password(password.c_str(), password.length())) {
+      Serial.println("Invalid Wi-Fi password: use none, 8-63 printable ASCII characters or 64 hex digits.");
+      continue;
     }
     StaticJsonDocument<384> settings;
     settings["ssid"] = ssid; settings["password"] = password;
@@ -186,9 +250,7 @@ void setup() {
   if (xTaskCreate(output_task, "rgb-output", 4096, nullptr, 2, nullptr) != pdPASS) abort();
   const char* headers[] = {"Origin", "Content-Type"}; http.collectHeaders(headers, 2);
   http.on("/v1/info", HTTP_GET, status); http.on("/v1/status", HTTP_GET, status);
-  http.on("/v1/identify", HTTP_POST, identify);
-  http.on("/v1/stream/start", HTTP_POST, start_stream);
-  http.on("/v1/stream/stop", HTTP_POST, stop_stream);
+  http.addHandler(&control_handler);
   http.onNotFound([] { http.send(404, "application/json", "{}"); });
   if (!preferences.begin("wifi", false)) { Serial.println("Cannot open Wi-Fi settings storage."); abort(); }
   StaticJsonDocument<384> settings;
@@ -197,6 +259,7 @@ void setup() {
     configured_ssid = settings["ssid"] | "";
     configured_password = settings["password"] | "";
   }
+  WiFi.persistent(false); // The `wifi` namespace is the only credential store.
   WiFi.mode(WIFI_STA); WiFi.setHostname(hostname.c_str()); WiFi.setAutoReconnect(true);
   WiFi.setSleep(false); // Powered prototype: avoid modem sleep latency, including discovery.
   if (configured_ssid.length()) WiFi.begin(configured_ssid.c_str(), configured_password.c_str());
@@ -207,21 +270,36 @@ void loop() {
   const bool wifi = WiFi.status() == WL_CONNECTED;
   static IPAddress advertised_ip;
   static uint32_t last_retry = 0;
-  if (wifi && (!connected || WiFi.localIP() != advertised_ip)) {
-    if (connected) { http.stop(); MDNS.end(); Guard guard; stream.stop(); }
-    connected = true; advertised_ip = WiFi.localIP();
+  static uint32_t service_failed_at = 0;
+  static bool service_failed = false;
+  if (wifi && (!connected || WiFi.localIP() != advertised_ip) &&
+      (!service_failed || uint32_t(millis() - service_failed_at) >= kServiceRetryMs)) {
+    if (connected) { connected = false; http.stop(); MDNS.end(); Guard guard; stream.stop(); }
+    advertised_ip = WiFi.localIP();
     http.begin();
     if (MDNS.begin(hostname.c_str())) {
       MDNS.addService("iotensity", "tcp", kHttpPort);
       MDNS.addServiceTxt("iotensity", "tcp", "id", device_id);
       MDNS.addServiceTxt("iotensity", "tcp", "model", "esp32-rgb");
       MDNS.addServiceTxt("iotensity", "tcp", "pv", "1");
-    } else { connected = false; http.stop(); }
-    Serial.println("Local network services ready.");
+      connected = true; service_failed = false;
+      Serial.println("Local network services ready.");
+    } else {
+      http.stop(); MDNS.end(); service_failed = true; service_failed_at = millis();
+      Serial.printf("mDNS start failed; retrying in %u ms.\n", unsigned(kServiceRetryMs));
+    }
   }
   if (!wifi && connected) { connected = false; http.stop(); MDNS.end(); Guard guard; stream.stop(); }
-  if (!wifi && uint32_t(millis() - last_retry) >= 5000 && configured_ssid.length()) {
+  if (!wifi) service_failed = false; // A fresh Wi-Fi connection retries services immediately.
+  // WiFi.reconnect() aborts any attempt in progress, and Arduino-ESP32 2.x reports WL_DISCONNECTED
+  // while associating and WL_IDLE_STATUS while DHCP is pending, so status cannot separate a slow
+  // attempt from a stalled one. Auto-reconnect handles ordinary drops; only force a reconnect after
+  // a stall measured from the last connection or forced attempt, with exponential backoff.
+  static uint32_t retry_delay = kWifiRetryInitialMs;
+  if (wifi) { last_retry = millis(); retry_delay = kWifiRetryInitialMs; }
+  else if (uint32_t(millis() - last_retry) >= retry_delay && configured_ssid.length()) {
     last_retry = millis(); WiFi.reconnect();
+    retry_delay = retry_delay >= kWifiRetryMaxMs / 2 ? kWifiRetryMaxMs : retry_delay * 2;
   }
   if (connected) http.handleClient();
   delay(1);

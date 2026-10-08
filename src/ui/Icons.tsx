@@ -18,15 +18,7 @@ export type IconName =
   | 'orbit'
   | 'info';
 
-export function Icon({
-  name,
-  size = 20,
-  className = '',
-}: {
-  name: IconName;
-  size?: number;
-  className?: string;
-}) {
+export function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
   const paths: Record<IconName, React.ReactNode> = {
     sync: (
       <>
@@ -88,7 +80,6 @@ export function Icon({
   };
   return (
     <svg
-      className={className}
       width={size}
       height={size}
       viewBox="0 0 24 24"

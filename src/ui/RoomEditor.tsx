@@ -1,5 +1,12 @@
-import { useState } from 'react';
-import { BOUNDS, ICON_KINDS, MAX_LIGHTS, type Position } from '../domain/model';
+import { useMemo, useState } from 'react';
+import {
+  BOUNDS,
+  ICON_KINDS,
+  MAX_LIGHTS,
+  MAX_NAME_BYTES,
+  truncateName,
+  type Position,
+} from '../domain/model';
 import { useAppState, useStore } from '../state/context';
 import { RoomScene } from '../scene/RoomScene';
 import { Icon, LightIcon } from './Icons';
@@ -25,6 +32,14 @@ function CoordinateControl({
   onChange: (value: number) => void;
   disabled: boolean;
 }) {
+  // The typed text stays local while editing so partial entries such as "0",
+  // "-" or "" are not clamped mid-keystroke. Every number still updates the
+  // draft through the store's shared clamp, so dirty state and saves match
+  // what is typed; blur and Enter then show the clamped value.
+  const [text, setText] = useState<string | null>(null);
+  if (disabled && text !== null) setText(null);
+  const [min, max] = BOUNDS[axis];
+  const endEdit = () => setText(null);
   return (
     <div className="coordinate-control">
       <div className="coordinate-heading">
@@ -36,17 +51,20 @@ function CoordinateControl({
           <input
             aria-label={`${AXIS_LABELS[axis]} coordinate`}
             type="number"
-            min={BOUNDS[axis][0]}
-            max={BOUNDS[axis][1]}
+            min={min}
+            max={max}
             step="0.01"
-            value={value}
+            value={text ?? value}
             disabled={disabled}
             onChange={(event) => {
-              if (
-                event.target.value !== '' &&
-                Number.isFinite(event.target.valueAsNumber)
-              )
-                onChange(event.target.valueAsNumber);
+              const next = event.target.valueAsNumber;
+              setText(event.target.value);
+              if (event.target.value !== '' && Number.isFinite(next))
+                onChange(next);
+            }}
+            onBlur={endEdit}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') endEdit();
             }}
           />
           <span>m</span>
@@ -84,7 +102,20 @@ export function RoomEditor() {
   const [resetKey, setResetKey] = useState(0);
   const room = state.draft!;
   const light = room.lights.find((item) => item.id === state.selectedLightId);
+  // Stable per-kind arrays keep the card paint loops running across unrelated renders.
+  const groups = useMemo(
+    () =>
+      (['virtual', 'esp32'] as const).map(
+        (kind) =>
+          [
+            kind,
+            room.lights.filter((item) => item.output.kind === kind),
+          ] as const,
+      ),
+    [room.lights],
+  );
   const saving = state.saveStatus === 'saving';
+  const nameMissing = !!light && !light.name.trim();
   return (
     <section className="page rooms-page" aria-labelledby="rooms-title">
       <header className="page-heading">
@@ -198,11 +229,8 @@ export function RoomEditor() {
                 </span>
               </span>
             </div>
-            {(['virtual', 'esp32'] as const).map((kind) => {
-              const lights = room.lights.filter(
-                (light) => light.output.kind === kind,
-              );
-              return lights.length ? (
+            {groups.map(([kind, lights]) =>
+              lights.length ? (
                 <div key={kind} className="output-group">
                   <h3 className="eyebrow mono">
                     {kind === 'virtual' ? 'VIRTUAL PREVIEW' : 'PHYSICAL LIGHTS'}
@@ -214,8 +242,8 @@ export function RoomEditor() {
                     editable
                   />
                 </div>
-              ) : null;
-            })}
+              ) : null,
+            )}
             {!room.lights.length && (
               <button className="empty-card" onClick={() => store.addLight()}>
                 <Icon name="plus" size={24} />
@@ -246,13 +274,24 @@ export function RoomEditor() {
               <input
                 className="name-input"
                 id="light-name"
-                maxLength={64}
+                // UTF-16 length never exceeds UTF-8 bytes; truncateName
+                // enforces the byte limit for multi-byte text.
+                maxLength={MAX_NAME_BYTES}
                 value={light.name}
                 disabled={saving}
+                aria-invalid={nameMissing || undefined}
+                aria-describedby={nameMissing ? 'light-name-error' : undefined}
                 onChange={(event) =>
-                  store.updateLight(light.id, { name: event.target.value })
+                  store.updateLight(light.id, {
+                    name: truncateName(event.target.value),
+                  })
                 }
               />
+              {nameMissing && (
+                <p className="field-error" id="light-name-error">
+                  Enter a name before saving this room.
+                </p>
+              )}
               <div className="binding-control">
                 <PhysicalStatus light={light} />
                 {light.output.kind === 'esp32' ? (
@@ -370,7 +409,7 @@ export function RoomEditor() {
                   : (['y'] as const)
                 ).map((axis) => (
                   <CoordinateControl
-                    key={axis}
+                    key={`${light.id}-${axis}`}
                     axis={axis}
                     value={light.position[axis]}
                     disabled={saving}

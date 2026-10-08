@@ -1,4 +1,6 @@
+import { renderHook } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
+import { useOutputInvalidation } from '../src/scene/invalidation';
 import { NativeSyncOutput, type SyncSnapshot } from '../src/sync/output';
 import { deferred } from './helpers';
 
@@ -44,6 +46,40 @@ describe('passive native color output', () => {
     expect(output.getColor('a')).toEqual([200 / 255, 0, 1]);
     output.dispose();
     expect(unlisten).toHaveBeenCalledOnce();
+  });
+  it('requests a demand-rendered scene frame only when a newer snapshot changes colors', async () => {
+    let receive!: (snapshot: SyncSnapshot) => void;
+    const output = new NativeSyncOutput(true, {
+      listen: async (callback) => {
+        receive = callback;
+        return () => {};
+      },
+      invoke: async <T>() => initial as T,
+    });
+    await output.connect();
+    const invalidate = vi.fn();
+    const { unmount } = renderHook(() =>
+      useOutputInvalidation(output, invalidate),
+    );
+    const colors = [
+      { id: 'a', rgb: [188, 0, 255] as [number, number, number] },
+    ];
+    receive({ ...initial, sequence: 1, status: 'running', colors });
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    // Static colors repeat with fresh sequences; old snapshots are rejected.
+    receive({ ...initial, sequence: 2, status: 'running', colors });
+    receive({ ...initial, sequence: 1, colors: [] });
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    receive({
+      ...initial,
+      sequence: 3,
+      status: 'running',
+      colors: [{ id: 'a', rgb: [188, 1, 255] }],
+    });
+    expect(invalidate).toHaveBeenCalledTimes(2);
+    unmount();
+    receive({ ...initial, sequence: 4, colors: [] });
+    expect(invalidate).toHaveBeenCalledTimes(2);
   });
   it('start only sends a source: draft positions and camera transforms cannot cross this boundary', async () => {
     const invoke = vi.fn(

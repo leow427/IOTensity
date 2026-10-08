@@ -186,9 +186,13 @@ pub struct Processor {
 impl Processor {
     /// Media output samples the latest image directly. Synthetic response presets
     /// do not delay screen changes; brightness is applied once in linear light.
-    pub fn frame(&self, lights: &[Light], brightness: u8) -> Vec<LightColor> {
+    pub fn frame<'a>(
+        &self,
+        lights: impl IntoIterator<Item = &'a Light>,
+        brightness: u8,
+    ) -> Vec<LightColor> {
         lights
-            .iter()
+            .into_iter()
             .map(|light| {
                 let rgb = self
                     .image

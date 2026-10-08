@@ -23,6 +23,9 @@ input {
 button {
   cursor: pointer;
   color: inherit;
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
 }
 button:disabled {
   cursor: default;
@@ -38,9 +41,6 @@ input:focus-visible {
   outline: 3px solid var(--orange);
   outline-offset: 3px;
 }
-button {
-  touch-action: manipulation;
-}
 button svg {
   flex-shrink: 0;
 }
@@ -54,10 +54,6 @@ h1,
 h2,
 p {
   margin: 0;
-}
-button {
-  -webkit-user-select: none;
-  user-select: none;
 }
 .mono,
 kbd {
@@ -96,7 +92,7 @@ kbd {
   align-items: center;
   gap: 9px;
   color: #666b60;
-  font-size: 8px;
+  font-size: 9px;
   pointer-events: none;
 }
 .status-dot {
@@ -169,7 +165,7 @@ main {
   margin-bottom: 27px;
 }
 .eyebrow {
-  color: #737b6b;
+  color: #55604b;
   font-size: 9px;
   letter-spacing: 0.1em;
 }
@@ -226,13 +222,6 @@ h1 {
   font-size: 12px;
   font-weight: 500;
 }
-.scene-caption {
-  font-size: 8px;
-  opacity: 0.44;
-  border-left: 1px solid #68766066;
-  padding-left: 9px;
-  margin-left: 3px;
-}
 .scene-icon-button {
   border: 1px solid #84947433;
   background: #2c382d;
@@ -262,7 +251,8 @@ h1 {
   justify-content: space-between;
   align-items: center;
   pointer-events: none;
-  opacity: 0.65;
+  opacity: 1;
+  color: #a5b69a;
 }
 .scene-bottomline > span {
   display: flex;
@@ -494,8 +484,8 @@ input[type='range']::-moz-range-thumb {
 .range-labels {
   display: flex;
   justify-content: space-between;
-  font-size: 7px;
-  color: #858e76;
+  font-size: 8px;
+  color: #55604b;
   margin-top: 4px;
 }
 .intensity-control legend {
@@ -513,7 +503,7 @@ input[type='range']::-moz-range-thumb {
   border-bottom-width: 2px;
   border-radius: 5px;
   padding: 5px 0 8px;
-  color: #7c876c;
+  color: #526044;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -527,11 +517,11 @@ input[type='range']::-moz-range-thumb {
   box-shadow: inset 0 1px 3px #17201066;
 }
 .intensity-options button span {
-  font-size: 8px;
+  font-size: 10px;
 }
 .intensity-control p {
-  font-size: 9px;
-  color: #727d61;
+  font-size: 10px;
+  color: #55604b;
   line-height: 1.5;
   margin-top: 12px;
   min-height: 28px;
@@ -554,7 +544,7 @@ input[type='range']::-moz-range-thumb {
   align-items: center;
   gap: 7px;
   font-size: 10px;
-  color: #737e63;
+  color: #55604b;
 }
 .text-button:hover:not(:disabled) {
   color: #242f1d;
@@ -568,7 +558,7 @@ input[type='range']::-moz-range-thumb {
   justify-content: center;
   gap: 17px;
   font-size: 10px;
-  color: #868f7a;
+  color: #55604b;
 }
 .output-dashes {
   display: flex;
@@ -594,7 +584,7 @@ input[type='range']::-moz-range-thumb {
   align-items: center;
   justify-content: space-between;
   padding: 19px 0 0;
-  color: #868e7a;
+  color: #55604b;
 }
 .page-footer > span {
   display: flex;
@@ -603,7 +593,7 @@ input[type='range']::-moz-range-thumb {
   font-size: 9px;
 }
 .page-footer > .mono {
-  font-size: 7px;
+  font-size: 8px;
 }
 .save-actions {
   display: flex;
@@ -611,11 +601,11 @@ input[type='range']::-moz-range-thumb {
   align-items: center;
 }
 .save-state {
-  font-size: 8px;
-  color: #859176;
+  font-size: 9px;
+  color: #55604b;
 }
 .save-state.is-dirty {
-  color: #a1592f;
+  color: #92502c;
 }
 .save-button {
   min-height: 38px;
@@ -736,7 +726,7 @@ button.light-card:focus-visible {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  opacity: 0.7;
+  opacity: 1;
   height: 13px;
   margin-bottom: 13px;
 }
@@ -791,7 +781,7 @@ button.light-card:focus-visible {
   border: 1px dashed #b5c3a2;
   border-radius: 10px;
   background: #e3e7d9;
-  color: #7c8a69;
+  color: #55604b;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -800,7 +790,7 @@ button.light-card:focus-visible {
 }
 .empty-card span {
   font-size: 10px;
-  color: #607346;
+  color: #55604b;
 }
 .light-inspector {
   background: #e0e4d6;
@@ -834,14 +824,14 @@ button.light-card:focus-visible {
   align-items: center;
   gap: 16px;
   margin: 10px 0 17px;
-  color: #677e50;
+  color: #55604b;
 }
 .inspector-light-icon .mono {
   font-size: 7px;
 }
 .field-label {
   font-size: 10px;
-  color: #6b7d58;
+  color: #55604b;
   display: block;
   margin-bottom: 7px;
 }
@@ -854,6 +844,14 @@ button.light-card:focus-visible {
   border-radius: 5px;
   font-size: 12px;
   box-shadow: inset 0 1px 2px #7993500a;
+}
+.name-input[aria-invalid='true'] {
+  border-color: #b8693f;
+}
+.field-error {
+  margin: 6px 0 0;
+  font-size: 10px;
+  color: #8d4b2c;
 }
 .appearance-picker {
   margin-top: 17px;
@@ -873,7 +871,7 @@ button.light-card:focus-visible {
   border-radius: 5px;
   border: 1px solid transparent;
   background: transparent;
-  color: #728660;
+  color: #55604b;
 }
 .appearance-picker button[aria-pressed='true'] {
   border-color: #9baa8b;
@@ -884,7 +882,7 @@ button.light-card:focus-visible {
   background: #d4deca;
 }
 .appearance-picker span {
-  font-size: 7px;
+  font-size: 10px;
 }
 .inspector-divider {
   border-top: 1px solid #c3cfb3;
@@ -907,7 +905,7 @@ button.light-card:focus-visible {
   background: transparent;
   border: 0;
   border-radius: 4px;
-  color: #718661;
+  color: #4b563e;
   font-size: 10px;
 }
 .edit-tabs button[aria-selected='true'] {
@@ -929,12 +927,13 @@ button.light-card:focus-visible {
 }
 .coordinate-heading label {
   font-size: 10px;
-  color: #5c7348;
+  color: #55604b;
 }
 .axis-badge {
   font-size: 8px;
-  opacity: 0.5;
+  opacity: 1;
   margin-left: 5px;
+  color: #55604b;
 }
 .coordinate-number {
   display: flex;
@@ -970,8 +969,8 @@ input.range-z {
   display: flex;
   align-items: flex-start;
   gap: 7px;
-  color: #778c62;
-  font-size: 8px;
+  color: #55604b;
+  font-size: 10px;
   line-height: 1.6;
   padding-top: 18px;
 }
@@ -994,7 +993,7 @@ input.range-z {
   gap: 14px;
 }
 .delete-button {
-  color: #9b7258;
+  color: #8c5036;
   font-size: 9px;
 }
 .inspector-empty {
@@ -1016,7 +1015,7 @@ input.range-z {
   margin: 15px 0 25px;
   font-size: 11px;
   line-height: 1.6;
-  color: #7a8b69;
+  color: #55604b;
 }
 .scene-fallback {
   height: 100%;
@@ -1049,7 +1048,11 @@ input.range-z {
   white-space: nowrap;
   color: #8d4b2c;
 }
-.preference-error {
+.error-banner .text-button + .text-button {
+  margin-left: 0;
+}
+.preference-error,
+.close-error {
   margin: 20px 30px 0;
 }
 .app-message {
@@ -1066,7 +1069,7 @@ input.range-z {
   font-size: 13px;
   line-height: 1.6;
   max-width: 550px;
-  color: #758267;
+  color: #55604b;
 }
 .app-message > svg {
   color: var(--orange);
@@ -1093,7 +1096,7 @@ input.range-z {
 .unsaved-dialog p {
   font-size: 12px;
   line-height: 1.7;
-  color: #7c8d6b;
+  color: #55604b;
   margin: 13px 0 25px;
 }
 .dialog-actions {
@@ -1144,9 +1147,6 @@ input.range-z {
   .save-actions {
     gap: 9px;
   }
-  .save-state {
-    font-size: 7px;
-  }
   .room-scene {
     height: 340px;
   }
@@ -1155,9 +1155,6 @@ input.range-z {
   }
   .light-inspector {
     padding: 15px;
-  }
-  .page-footer > .mono {
-    font-size: 6px;
   }
 }
 @media (max-width: 900px) {
@@ -1175,9 +1172,6 @@ input.range-z {
   .save-actions {
     flex-direction: column;
     align-items: flex-end;
-  }
-  .scene-caption {
-    display: none;
   }
   .light-inspector {
     padding: 13px;
@@ -1203,77 +1197,9 @@ input.range-z {
     scroll-behavior: auto !important;
   }
 }
-
-/* Maintain readable contrast for secondary labels. */
-.eyebrow,
-.text-button,
-.empty-output,
-.page-footer,
-.range-labels,
-.intensity-control p,
-.save-state,
-.field-label,
-.inspector-light-icon,
-.appearance-picker button,
-.edit-tabs button,
-.coordinate-heading label,
-.calibration-note,
-.inspector-empty p,
-.empty-card,
-.empty-card span,
-.app-message p,
-.unsaved-dialog p {
-  color: #55604b;
-}
-.axis-badge {
-  opacity: 1;
-  color: #55604b;
-}
-.scene-caption {
-  opacity: 1;
-  color: #a5b69a;
-}
-.scene-bottomline {
-  opacity: 1;
-  color: #a5b69a;
-}
-.intensity-options button {
-  color: #526044;
-}
-.intensity-options button[aria-pressed='true'] {
-  color: #e4efca;
-}
-.save-state.is-dirty {
-  color: #92502c;
-}
-.delete-button {
-  color: #8c5036;
-}
-.card-top {
-  opacity: 1;
-}
 .save-button kbd {
   opacity: 1;
   color: #c7d5ba;
-}
-.titlebar-status,
-.eyebrow,
-.save-state {
-  font-size: 9px;
-}
-.page-footer > .mono,
-.range-labels {
-  font-size: 8px;
-}
-.field-label,
-.appearance-picker span,
-.intensity-options button span,
-.calibration-note,
-.intensity-control p {
-  font-size: 10px;
-}
-.edit-tabs button {
-  color: #4b563e;
 }
 
 .sync-status,

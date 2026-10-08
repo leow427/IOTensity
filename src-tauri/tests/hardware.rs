@@ -18,6 +18,8 @@ struct FakeControl {
     lost_response: Cell<bool>,
     stopped: Cell<usize>,
     next_session: Cell<u8>,
+    // Addresses no longer answering for this device (DHCP move, dropped off Wi-Fi).
+    dead: RefCell<Vec<Ipv4Addr>>,
 }
 impl Default for FakeControl {
     fn default() -> Self {
@@ -35,12 +37,13 @@ impl Default for FakeControl {
             lost_response: Cell::new(false),
             stopped: Cell::new(0),
             next_session: Cell::new(1),
+            dead: RefCell::new(vec![]),
         }
     }
 }
 impl Control for FakeControl {
-    fn status(&self, _: SocketAddrV4) -> Result<Status, String> {
-        if self.failed.get() {
+    fn status(&self, endpoint: SocketAddrV4) -> Result<Status, String> {
+        if self.failed.get() || self.dead.borrow().contains(endpoint.ip()) {
             return Err("Unavailable".into());
         }
         Ok(self.status.borrow().clone())
@@ -52,6 +55,9 @@ impl Control for FakeControl {
         _: &str,
         request: &str,
     ) -> Result<Status, String> {
+        if self.dead.borrow().contains(endpoint.ip()) {
+            return Err("Unavailable".into());
+        }
         let retry = self.status.borrow().session_id.is_some()
             && self
                 .requests
@@ -81,7 +87,6 @@ fn wish() -> Wish {
     Wish {
         epoch: 1,
         light_id: Some("logical-room-light".into()),
-        running: true,
         endpoints: vec![SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 20), 80)],
     }
 }
@@ -102,9 +107,13 @@ fn reboot_dhcp_outage_and_stop_preserve_binding_and_renew_sessions() {
         .clone()
         .unwrap();
     assert_ne!(reboot.session, first.session);
-    wish.endpoints[0].set_ip(Ipv4Addr::new(192, 168, 1, 55)); // DHCP change by full ID
+    // DHCP change by full ID: the device rejoins at a new address without its session.
+    control.dead.borrow_mut().push(*wish.endpoints[0].ip());
+    control.status.borrow_mut().session_id = None;
+    wish.endpoints[0].set_ip(Ipv4Addr::new(192, 168, 1, 55));
+    assert!(connection.step(1500, &wish, &control).target.is_none());
     let moved = connection
-        .step(1001, &wish, &control)
+        .step(2500, &wish, &control)
         .target
         .clone()
         .unwrap();
@@ -112,18 +121,65 @@ fn reboot_dhcp_outage_and_stop_preserve_binding_and_renew_sessions() {
     assert_eq!(moved.light_id, first.light_id);
     assert_ne!(moved.session, reboot.session);
     control.failed.set(true);
-    assert!(!connection.step(2000, &wish, &control).online);
+    assert!(!connection.step(3000, &wish, &control).online);
     assert!(connection.state.target.is_none());
     control.failed.set(false);
     control.status.borrow_mut().session_id = None;
     assert!(connection.step(7000, &wish, &control).target.is_some());
-    wish.running = false;
+    wish.light_id = None;
     wish.epoch += 1;
     assert!(connection.step(7001, &wish, &control).target.is_none());
-    assert!(control.stopped.get() >= 2);
+    assert_eq!(control.stopped.get(), 1);
     control.status.borrow_mut().session_id = None;
     connection.step(10000, &wish, &control);
     assert!(connection.state.target.is_none()); // Do not resume after explicit stop.
+}
+#[test]
+fn discovery_churn_keeps_verified_stream_until_its_address_fails() {
+    let control = FakeControl::default();
+    let mut connection = Connection::new(ID.into(), "computer".into());
+    let mut wish = wish();
+    let first = connection.step(0, &wish, &control).target.clone().unwrap();
+    // Lost multicast lets the record expire (ServiceRemoved) while unicast still works.
+    wish.endpoints.clear();
+    for now in [1, 500, 1000] {
+        let state = connection.step(now, &wish, &control);
+        assert!(state.online);
+        assert_eq!(state.target.as_ref(), Some(&first));
+    }
+    // A different or partial re-resolve is only a candidate for the next reconnect.
+    let advertised = SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 55), 80);
+    wish.endpoints = vec![advertised];
+    for now in [1001, 1500] {
+        assert_eq!(
+            connection.step(now, &wish, &control).target.as_ref(),
+            Some(&first)
+        );
+    }
+    assert_eq!(control.stopped.get(), 0);
+    assert_eq!(control.requests.borrow().len(), 1);
+    // Only when the verified address fails its own probe does the worker move.
+    control.dead.borrow_mut().push(*first.address.ip());
+    assert!(connection.step(2000, &wish, &control).target.is_none());
+    let moved = connection
+        .step(3000, &wish, &control)
+        .target
+        .clone()
+        .unwrap();
+    assert_eq!(moved.address.ip(), advertised.ip());
+    assert_eq!(moved.light_id, first.light_id);
+    assert_eq!(control.requests.borrow().last().unwrap().0, advertised);
+    assert_eq!(control.stopped.get(), 0);
+    // A binding change still stops the old session and negotiates a fresh one.
+    wish.light_id = Some("another-room-light".into());
+    let rebound = connection
+        .step(3001, &wish, &control)
+        .target
+        .clone()
+        .unwrap();
+    assert_eq!(control.stopped.get(), 1);
+    assert_eq!(rebound.light_id, "another-room-light");
+    assert_ne!(rebound.session, moved.session);
 }
 #[test]
 fn retries_lost_start_ack_with_same_request_and_rejects_ip_reuse() {

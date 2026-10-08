@@ -3,7 +3,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chooseIdentity, isMacBundle, parseIdentities } from './signing.js';
+import {
+  chooseIdentity,
+  isMacBundle,
+  parseIdentities,
+  requestedIdentity,
+  tauriSubcommand,
+} from './signing.js';
 import {
   appInstallation,
   assertNotRunning,
@@ -14,6 +20,7 @@ import {
 const root = fileURLToPath(new URL('../', import.meta.url));
 const args = process.argv.slice(2);
 const env = { ...process.env };
+let fingerprint;
 
 try {
   if (isMacBundle(process.platform, args)) {
@@ -34,7 +41,7 @@ try {
     );
     const identity = chooseIdentity(
       identities,
-      env.APPLE_SIGNING_IDENTITY ?? pin?.fingerprint,
+      requestedIdentity(env.APPLE_SIGNING_IDENTITY, pin?.fingerprint),
     );
     // Pin once, so adding another certificate cannot silently change app identity.
     // An explicit environment override deliberately selects and pins a replacement.
@@ -47,13 +54,14 @@ try {
       );
     }
     env.APPLE_SIGNING_IDENTITY = identity.name;
+    fingerprint = identity.fingerprint;
     console.log(
       'Using the pinned macOS signing identity; unsigned fallback is disabled.',
     );
   }
   if (
     process.platform === 'darwin' &&
-    (args[0] === 'dev' || args.includes('--debug'))
+    (tauriSubcommand(args) === 'dev' || args.includes('--debug'))
   ) {
     // Tauri dev runs an unbundled executable. Its permissions and configuration
     // must never replace those belonging to the signed release app.
@@ -92,7 +100,9 @@ try {
     process.exitCode = code ?? 1;
     if (code === 0 && installation) {
       try {
-        console.log(`Installed current build: ${installBundle(installation)}`);
+        console.log(
+          `Installed current build: ${installBundle({ ...installation, fingerprint })}`,
+        );
       } catch (error) {
         console.error(
           `Build completed, but installation failed: ${error.message}`,

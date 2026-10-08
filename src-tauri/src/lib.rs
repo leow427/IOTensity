@@ -1,3 +1,4 @@
+mod activity;
 pub mod config;
 pub mod hardware;
 mod overlay;
@@ -44,60 +45,118 @@ fn install_guarded_quit(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-#[tauri::command]
-fn load_config(
-    store: tauri::State<'_, ConfigStore>,
-    sync: tauri::State<'_, sync::SyncService>,
-    hardware: tauri::State<'_, hardware::HardwareService>,
-) -> Result<Configuration, ConfigError> {
-    let config = store.load()?;
-    sync.apply_saved(config.clone());
-    hardware.apply_saved(config.clone());
-    Ok(config)
+// Commands that touch the disk or the sync mutex (held by the output loop while
+// it processes a frame) run on the blocking pool. Synchronous Tauri commands
+// run on the main thread and would stall the UI, overlay and event loop.
+// The frontend serializes saves and sync commands; each body still runs in order.
+async fn blocking<T: Send + 'static, E: Send + 'static>(
+    task: impl FnOnce() -> Result<T, E> + Send + 'static,
+    join_error: impl FnOnce(String) -> E,
+) -> Result<T, E> {
+    tauri::async_runtime::spawn_blocking(task)
+        .await
+        .unwrap_or_else(|error| Err(join_error(error.to_string())))
+}
+
+fn config_task_failed(error: String) -> ConfigError {
+    ConfigError {
+        code: "io",
+        message: format!("Configuration task failed ({error}). Restart IOTensity."),
+    }
 }
 
 #[tauri::command]
-fn save_config(
-    store: tauri::State<'_, ConfigStore>,
+async fn load_config(app: tauri::AppHandle) -> Result<Configuration, ConfigError> {
+    blocking(
+        move || {
+            let config = app.state::<ConfigStore>().load()?;
+            app.state::<sync::SyncService>().apply_saved(config.clone());
+            app.state::<hardware::HardwareService>()
+                .apply_saved(config.clone());
+            Ok(config)
+        },
+        config_task_failed,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn save_config(
     app: tauri::AppHandle,
     config: Configuration,
     expected_revision: u64,
-    sync: tauri::State<'_, sync::SyncService>,
-    hardware: tauri::State<'_, hardware::HardwareService>,
 ) -> Result<Configuration, ConfigError> {
-    let saved = store.save(config, expected_revision)?;
-    sync.apply_saved(saved.clone());
-    hardware.apply_saved(saved.clone());
-    let _ = app.emit("configuration-saved", &saved);
-    Ok(saved)
+    blocking(
+        move || {
+            let saved = app.state::<ConfigStore>().save(config, expected_revision)?;
+            app.state::<sync::SyncService>().apply_saved(saved.clone());
+            app.state::<hardware::HardwareService>()
+                .apply_saved(saved.clone());
+            let _ = app.emit("configuration-saved", &saved);
+            Ok(saved)
+        },
+        config_task_failed,
+    )
+    .await
 }
 
 #[tauri::command]
-fn sync_snapshot(sync: tauri::State<'_, sync::SyncService>) -> sync::Snapshot {
-    sync.snapshot()
+async fn sync_snapshot(
+    sync: tauri::State<'_, sync::SyncService>,
+) -> Result<sync::Snapshot, String> {
+    let sync = sync.inner().clone();
+    blocking(move || Ok(sync.snapshot()), |error| error).await
 }
 #[tauri::command]
-fn start_sync(
+async fn start_sync(
     sync: tauri::State<'_, sync::SyncService>,
     source: sync::Source,
     reduced_motion: Option<bool>,
 ) -> Result<sync::Snapshot, String> {
-    sync.set_reduced_motion(reduced_motion.unwrap_or(false));
-    sync.start(source)
+    let sync = sync.inner().clone();
+    blocking(
+        move || {
+            sync.set_reduced_motion(reduced_motion.unwrap_or(false));
+            sync.start(source)
+        },
+        |error| error,
+    )
+    .await
 }
 #[tauri::command]
-fn set_reduced_motion(sync: tauri::State<'_, sync::SyncService>, reduced_motion: bool) {
-    sync.set_reduced_motion(reduced_motion);
+async fn set_reduced_motion(
+    sync: tauri::State<'_, sync::SyncService>,
+    reduced_motion: bool,
+) -> Result<(), String> {
+    let sync = sync.inner().clone();
+    blocking(
+        move || {
+            sync.set_reduced_motion(reduced_motion);
+            Ok(())
+        },
+        |error| error,
+    )
+    .await
 }
 #[tauri::command]
-fn stop_sync(
+async fn stop_sync(
     sync: tauri::State<'_, sync::SyncService>,
     hardware: tauri::State<'_, hardware::HardwareService>,
-) -> sync::Snapshot {
-    let _ = hardware.preview(None);
-    sync.stop()
+) -> Result<sync::Snapshot, String> {
+    let sync = sync.inner().clone();
+    let hardware = hardware.inner().clone();
+    blocking(
+        move || {
+            let _ = hardware.preview(None);
+            Ok(sync.stop())
+        },
+        |error| error,
+    )
+    .await
 }
 
+// Brief in-memory hardware state updates; preview stays on the main thread so
+// requests apply in arrival order.
 #[tauri::command]
 fn set_light_preview(
     window: tauri::WebviewWindow,
@@ -127,9 +186,7 @@ async fn identify_device(
     device_id: String,
 ) -> Result<(), String> {
     let hardware = hardware.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || hardware.identify(&device_id))
-        .await
-        .map_err(|e| e.to_string())?
+    blocking(move || hardware.identify(&device_id), |error| error).await
 }
 
 pub fn run() {
@@ -200,4 +257,33 @@ pub fn run() {
             }
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blocking_commands_return_task_results_and_config_error_shapes() {
+        let ok = tauri::async_runtime::block_on(blocking(|| Ok::<_, String>(7), |e| e));
+        assert_eq!(ok, Ok(7));
+        let failed = tauri::async_runtime::block_on(blocking(
+            || {
+                Err::<(), _>(ConfigError {
+                    code: "conflict",
+                    message: "kept".into(),
+                })
+            },
+            config_task_failed,
+        ));
+        assert_eq!(failed.unwrap_err().code, "conflict");
+        // A panicking task becomes a serializable error instead of a dropped reply.
+        let panicked = tauri::async_runtime::block_on(blocking(
+            || -> Result<(), ConfigError> { panic!("task panicked") },
+            config_task_failed,
+        ));
+        let error = panicked.unwrap_err();
+        assert_eq!(error.code, "io");
+        assert!(error.message.ends_with("Restart IOTensity."));
+    }
 }

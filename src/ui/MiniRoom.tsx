@@ -24,16 +24,18 @@ export function MiniRoomScene({
   output: SyncOutput;
 }) {
   const elements = useRef(new Map<string, SVGCircleElement>());
+  // Last painted fill per element; remounted elements start unpainted.
+  const painted = useRef(new WeakMap<SVGCircleElement, string>());
   useEffect(() => {
     let frame = 0;
     const paint = () => {
       for (const light of room.lights) {
         const element = elements.current.get(light.id);
-        if (element)
-          element.setAttribute(
-            'fill',
-            colorCss(resolveColor(light, output.getColor(light.id))),
-          );
+        if (!element) continue;
+        const fill = colorCss(resolveColor(light, output.getColor(light.id)));
+        if (painted.current.get(element) === fill) continue;
+        painted.current.set(element, fill);
+        element.setAttribute('fill', fill);
       }
       frame = requestAnimationFrame(paint);
     };
@@ -114,28 +116,43 @@ export function MiniRoomScene({
 export function MiniRoom({ output }: { output: SyncOutput }) {
   const [config, setConfig] = useState<Configuration | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const revision = useRef(-1);
   const status = useSyncExternalStore(output.subscribe, output.getSnapshot);
   useEffect(() => {
     let gone = false;
     let unlisten: (() => void) | undefined;
     const receive = (next: Configuration) => {
       validateConfiguration(next);
-      if (!gone)
-        setConfig((current) =>
-          current && current.revision > next.revision ? current : next,
-        );
+      // Older revisions never replace a newer saved room; a newer valid one
+      // also recovers from an earlier load or event failure.
+      if (gone || next.revision < revision.current) return;
+      revision.current = next.revision;
+      setConfig(next);
+      setError(null);
     };
     void (async () => {
       const cleanup = await listen<Configuration>(
         'configuration-saved',
-        ({ payload }) => receive(payload),
+        ({ payload }) => {
+          try {
+            receive(payload);
+          } catch {
+            // Ignore a malformed event and keep the last valid saved room.
+          }
+        },
       );
       if (gone) {
         cleanup();
         return;
       }
       unlisten = cleanup;
-      receive(await new NativePersistence().load());
+      try {
+        receive(await new NativePersistence().load());
+      } catch (reason) {
+        // A later valid configuration-saved event clears this; live colors
+        // still connect so a recovered room is not left without output.
+        if (!gone && revision.current < 0) setError(errorMessage(reason));
+      }
       await output.connect();
     })().catch((reason: unknown) => {
       if (!gone) setError(errorMessage(reason));

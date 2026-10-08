@@ -67,6 +67,24 @@ fn malformed_unsupported_and_unreadable_files_are_not_first_use() {
 }
 
 #[test]
+fn files_are_bounded_to_one_megabyte_and_saves_still_round_trip() {
+    const LIMIT: usize = 1_048_576;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("configuration.json");
+    let store = ConfigStore::new(path.clone());
+    let written = store.save(fixture(), 0).unwrap();
+    let mut content = fs::read(&path).unwrap();
+    content.resize(LIMIT, b' ');
+    fs::write(&path, &content).unwrap();
+    assert_eq!(store.load().unwrap(), written);
+    content.push(b' ');
+    fs::write(&path, &content).unwrap();
+    assert_eq!(store.load().unwrap_err().code, "invalid");
+    assert_eq!(store.save(written, 1).unwrap_err().code, "invalid");
+    assert_eq!(fs::read(path).unwrap(), content);
+}
+
+#[test]
 fn rejects_invalid_ids_names_axes_and_preferences() {
     let mut cases = vec![];
     let mut config = fixture();

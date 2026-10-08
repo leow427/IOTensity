@@ -1,5 +1,6 @@
 #import <AppKit/AppKit.h>
 #import <objc/runtime.h>
+#include <stdbool.h>
 
 // Keep Tauri's window/webview ownership intact. Host its content in a real
 // nonactivating NSPanel rather than changing the class of Tauri's NSWindow.
@@ -30,6 +31,17 @@
 @end
 
 static char IOOverlayPanelKey;
+// The panel currently hosting the overlay webview. While set, the owning
+// window has no content view, so callers must not resolve it again.
+static __weak IOOverlayPanel *IOHostingPanel;
+
+bool io_overlay_reshow(void) {
+    NSCAssert(NSThread.isMainThread, @"Overlay must be shown on the main thread");
+    IOOverlayPanel *panel = IOHostingPanel;
+    if (!panel) return false;
+    [panel orderFrontRegardless];
+    return true;
+}
 
 void io_overlay_show(void *pointer) {
     NSCAssert(NSThread.isMainThread, @"Overlay must be configured on the main thread");
@@ -65,11 +77,13 @@ void io_overlay_show(void *pointer) {
                 NSView *view = closing.contentView;
                 closing.contentView = nil;
                 closing.owner.contentView = view;
+                if (IOHostingPanel == closing) IOHostingPanel = nil;
                 [closing orderOut:nil];
                 [closing close];
                 objc_setAssociatedObject(notification.object, &IOOverlayPanelKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             }];
         objc_setAssociatedObject(owner, &IOOverlayPanelKey, panel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        IOHostingPanel = panel;
     }
     [panel orderFrontRegardless];
 }

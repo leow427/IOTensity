@@ -162,6 +162,76 @@ describe('draft / saved / runtime ownership', () => {
     expect(store.getSnapshot().readyToClose).toBe(true);
     expect(store.getSnapshot().saved!.preferences.brightness).toBe(25);
   });
+  it('honors a close requested during a dialog save after navigating', async () => {
+    const { store, persistence } = await setup();
+    await store.requestTransition('rooms');
+    store.addLight();
+    store.setPreferences({ brightness: 25 });
+    await store.requestTransition('sync');
+    const gate = deferred();
+    persistence.gate = gate.promise;
+    const saving = store.resolveTransition('save');
+    await store.requestTransition('close');
+    expect(store.getSnapshot().pending).toBe('close');
+    expect(store.getSnapshot().readyToClose).toBe(false);
+    gate.resolve();
+    await saving;
+    expect(store.getSnapshot().pending).toBeNull();
+    expect(store.getSnapshot().page).toBe('sync');
+    expect(store.getSnapshot().readyToClose).toBe(true);
+    expect(store.dirty).toBe(false);
+    expect(persistence.config.rooms[0].lights).toHaveLength(1);
+    expect(persistence.config.preferences.brightness).toBe(25);
+  });
+  it('keeps the window and draft when a dialog save fails after a close request', async () => {
+    const { store, persistence } = await setup();
+    await store.requestTransition('rooms');
+    store.addLight();
+    await store.requestTransition('sync');
+    const gate = deferred();
+    persistence.gate = gate.promise;
+    persistence.error = new Error('Disk full');
+    const saving = store.resolveTransition('save');
+    await store.requestTransition('close');
+    gate.resolve();
+    await saving;
+    expect(store.getSnapshot().readyToClose).toBe(false);
+    expect(store.getSnapshot().pending).toBeNull();
+    expect(store.getSnapshot().page).toBe('rooms');
+    expect(store.getSnapshot().saveError).toContain('Disk full');
+    expect(store.dirty).toBe(true);
+    expect(store.getSnapshot().draft!.lights).toHaveLength(1);
+    persistence.error = null;
+    persistence.gate = null;
+    await store.requestTransition('close');
+    expect(store.getSnapshot().pending).toBe('close');
+    await store.resolveTransition('save');
+    expect(store.getSnapshot().readyToClose).toBe(true);
+  });
+  it.each([true, false])(
+    'resolves a close requested during Save Room by the saved result (succeeds: %s)',
+    async (succeeds) => {
+      const { store, persistence } = await setup();
+      await store.requestTransition('rooms');
+      store.addLight();
+      const gate = deferred();
+      persistence.gate = gate.promise;
+      if (!succeeds) persistence.error = new Error('Disk full');
+      const saving = store.saveRoom();
+      await store.requestTransition('close');
+      expect(store.getSnapshot().pending).toBe('close');
+      gate.resolve();
+      expect(await saving).toBe(succeeds);
+      expect(store.getSnapshot().readyToClose).toBe(succeeds);
+      expect(store.getSnapshot().pending).toBe(succeeds ? null : 'close');
+      expect(store.dirty).toBe(!succeeds);
+      if (succeeds) return;
+      await store.resolveTransition('stay');
+      expect(store.getSnapshot().pending).toBeNull();
+      expect(store.getSnapshot().readyToClose).toBe(false);
+      expect(store.getSnapshot().draft!.lights).toHaveLength(1);
+    },
+  );
   it('surfaces load errors without allowing defaults to overwrite data', async () => {
     const persistence = new MemoryPersistence();
     persistence.error = new Error('Unsupported version');
@@ -266,6 +336,70 @@ describe('draft / saved / runtime ownership', () => {
     await store.requestTransition('close');
     expect(store.getSnapshot().readyToClose).toBe(true);
     expect(store.getSnapshot().preferenceError).toBeNull();
+  });
+  it('offers an explicit close without saving preferences only after a failed close flush', async () => {
+    const { store, persistence } = await setup();
+    store.closeWithoutSavingPreferences();
+    expect(store.getSnapshot().readyToClose).toBe(false);
+    store.setPreferences({ brightness: 25 });
+    persistence.error = new Error('Revision conflict');
+    await store.requestTransition('close');
+    expect(store.getSnapshot().readyToClose).toBe(false);
+    expect(store.getSnapshot().closeBlockedByPreferences).toBe(true);
+    const calls = persistence.calls.length;
+    store.closeWithoutSavingPreferences();
+    expect(store.getSnapshot().readyToClose).toBe(true);
+    expect(store.getSnapshot().closeBlockedByPreferences).toBe(false);
+    expect(persistence.calls).toHaveLength(calls);
+    expect(persistence.config.preferences.brightness).toBe(75);
+  });
+  it('clears the close escape when Retry succeeds and then closes normally', async () => {
+    const { store, persistence } = await setup();
+    store.setPreferences({ brightness: 25 });
+    persistence.error = new Error('Disk full');
+    await store.requestTransition('close');
+    expect(store.getSnapshot().closeBlockedByPreferences).toBe(true);
+    expect(await store.savePreferences()).toBe(false);
+    expect(store.getSnapshot().closeBlockedByPreferences).toBe(true);
+    persistence.error = null;
+    expect(await store.savePreferences()).toBe(true);
+    expect(store.getSnapshot().closeBlockedByPreferences).toBe(false);
+    expect(store.getSnapshot().preferenceError).toBeNull();
+    expect(store.getSnapshot().readyToClose).toBe(false);
+    await store.requestTransition('close');
+    expect(store.getSnapshot().readyToClose).toBe(true);
+    expect(persistence.config.preferences.brightness).toBe(25);
+  });
+  it('keeps the room guard when closing without saving preferences', async () => {
+    const { store, persistence } = await setup();
+    store.setPreferences({ brightness: 25 });
+    persistence.error = new Error('Disk full');
+    await store.requestTransition('close');
+    store.addLight();
+    store.closeWithoutSavingPreferences();
+    expect(store.getSnapshot().readyToClose).toBe(false);
+    expect(store.getSnapshot().pending).toBe('close');
+    await store.resolveTransition('stay');
+    expect(store.dirty).toBe(true);
+    store.closeWithoutSavingPreferences();
+    await store.resolveTransition('discard');
+    expect(store.getSnapshot().readyToClose).toBe(false);
+    expect(store.getSnapshot().closeBlockedByPreferences).toBe(true);
+    store.closeWithoutSavingPreferences();
+    expect(store.getSnapshot().readyToClose).toBe(true);
+    expect(persistence.config.rooms[0].lights).toHaveLength(0);
+  });
+  it('reports a window close failure separately from preference errors', async () => {
+    const { store } = await setup();
+    await store.requestTransition('close');
+    expect(store.getSnapshot().readyToClose).toBe(true);
+    store.closeFailed(new Error('Window destroy failed'));
+    expect(store.getSnapshot().readyToClose).toBe(false);
+    expect(store.getSnapshot().closeError).toContain('Window destroy failed');
+    expect(store.getSnapshot().preferenceError).toBeNull();
+    await store.requestTransition('close');
+    expect(store.getSnapshot().closeError).toBeNull();
+    expect(store.getSnapshot().readyToClose).toBe(true);
   });
   it('clears an older failed preference write when the newer queued write succeeds', async () => {
     const { store, persistence } = await setup();

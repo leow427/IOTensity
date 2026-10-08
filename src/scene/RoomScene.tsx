@@ -6,6 +6,7 @@ import {
 } from '@react-three/fiber';
 import {
   Component,
+  memo,
   useEffect,
   useMemo,
   useRef,
@@ -25,6 +26,8 @@ import { resolveColor } from '../domain/colors';
 import type { EditMode, Room, VirtualLight } from '../domain/model';
 import { useStore } from '../state/context';
 import type { AppStore } from '../state/store';
+import type { SyncOutput } from '../sync/output';
+import { useOutputInvalidation } from './invalidation';
 
 function Box({
   at,
@@ -45,7 +48,8 @@ function Box({
   );
 }
 
-function Furniture() {
+// Static scenery: memoized so draft edits and drags do not re-render it.
+const Furniture = memo(function Furniture() {
   return (
     <group>
       <Box at={[0, -0.08, 1.55]} size={[6.45, 0.16, 5.2]} color="#566058" />
@@ -140,7 +144,22 @@ function Furniture() {
       </mesh>
     </group>
   );
+});
+
+function DemandFrames({ output }: { output: SyncOutput }) {
+  const invalidate = useThree((state) => state.invalidate);
+  const width = useThree((state) => state.size.width);
+  const height = useThree((state) => state.size.height);
+  const dpr = useThree((state) => state.viewport.dpr);
+  useOutputInvalidation(output, invalidate);
+  // Resizing clears the drawing buffer without updating any scene object.
+  useEffect(() => invalidate(), [invalidate, width, height, dpr]);
+  return null;
 }
+
+// Damping keeps 0.88 of the momentum per frame, so this many frames reduce
+// it below a millionth, as continuous rendering once did.
+const SETTLE_FRAMES = 120;
 
 function CameraControl({
   dragging,
@@ -149,13 +168,26 @@ function CameraControl({
   dragging: boolean;
   resetKey: number;
 }) {
-  const { camera, gl, size } = useThree();
+  const { camera, gl, size, get, invalidate } = useThree();
   const controls = useMemo(() => new OrbitControls(camera), [camera]);
+  const fittedZoom = useRef(0);
+  const settleFrames = useRef(0);
   useEffect(() => {
     // Bind listeners in the effect so React's development remounts reconnect
     // cleanly, without side effects from a discarded render.
     controls.connect(gl.domElement);
-    controls.target.set(0, 0.9, 1.15);
+    // Orbit, zoom and each damping step emit `change` from update(); a frame
+    // requested during useFrame keeps the demand loop alive until damping settles.
+    const change = () => invalidate();
+    // A camera clamped at an orbit limit stops emitting `change` while damping
+    // momentum remains; keep a bounded run of frames after each gesture so it
+    // drains instead of replaying into the next orbit or Reset view.
+    const end = () => {
+      settleFrames.current = SETTLE_FRAMES;
+      invalidate();
+    };
+    controls.addEventListener('change', change);
+    controls.addEventListener('end', end);
     controls.enablePan = false;
     controls.enableDamping = true;
     controls.dampingFactor = 0.12;
@@ -165,25 +197,59 @@ function CameraControl({
     controls.maxAzimuthAngle = Math.PI / 2.5;
     controls.minZoom = 34;
     controls.maxZoom = 130;
-    return () => controls.dispose();
-  }, [controls, gl]);
+    return () => {
+      controls.removeEventListener('change', change);
+      controls.removeEventListener('end', end);
+      controls.dispose();
+    };
+  }, [controls, gl, invalidate]);
   useEffect(() => {
     controls.enabled = !dragging;
   }, [controls, dragging]);
+  // The full view resets only on mount and explicit Reset view.
   useEffect(() => {
+    // Discard pending damping momentum: without damping, update() applies and
+    // then clears it, so the pose below is not followed by leftover rotation.
+    const damping = controls.enableDamping;
+    controls.enableDamping = false;
+    controls.update();
+    controls.enableDamping = damping;
+    settleFrames.current = 0;
+    const { width, height } = get().size;
     camera.position.set(7.4, 6.8, 9);
     if (camera instanceof OrthographicCamera) {
-      camera.zoom = Math.min(size.width / 9.5, size.height / 6.8);
+      camera.zoom = fittedZoom.current = Math.min(width / 9.5, height / 6.8);
       camera.updateProjectionMatrix();
     }
     controls.target.set(0, 1, 1.3);
     controls.update();
-  }, [camera, controls, resetKey, size.width, size.height]);
-  useFrame(() => controls.update());
+    invalidate();
+  }, [camera, controls, get, invalidate, resetKey]);
+  // Resizing keeps the user's orbit and rescales zoom to the new viewport.
+  useEffect(() => {
+    if (!(camera instanceof OrthographicCamera)) return;
+    const fit = Math.min(size.width / 9.5, size.height / 6.8);
+    if (fit > 0 && fittedZoom.current > 0 && fit !== fittedZoom.current) {
+      camera.zoom *= fit / fittedZoom.current;
+      camera.updateProjectionMatrix();
+      invalidate();
+    }
+    if (fit > 0) fittedZoom.current = fit;
+  }, [camera, invalidate, size.width, size.height]);
+  useFrame(() => {
+    controls.update();
+    if (settleFrames.current > 0) {
+      settleFrames.current -= 1;
+      invalidate();
+    }
+  });
   return null;
 }
 
-function Orb({
+// Props stay referentially stable across unrelated store updates (the store
+// keeps untouched lights and `setDragging` is a state setter), so only the
+// moved or reselected orb re-renders during a drag.
+const Orb = memo(function Orb({
   light,
   selected,
   mode,
@@ -198,12 +264,15 @@ function Orb({
   store: AppStore;
   setDragging: (value: boolean) => void;
 }) {
-  const orb = useRef<Mesh>(null);
   const halo = useRef<Mesh>(null);
   const selectionRing = useRef<Mesh>(null);
   const material = useRef<MeshBasicMaterial>(null);
   const haloMaterial = useRef<MeshBasicMaterial>(null);
-  const { camera, gl } = useThree();
+  // Narrow selectors: R3F republishes its size object whenever the Canvas
+  // re-renders, which would otherwise bypass the memo on every store update.
+  const camera = useThree((state) => state.camera);
+  const gl = useThree((state) => state.gl);
+  const invalidate = useThree((state) => state.invalidate);
   const drag = useRef<{
     plane: Plane;
     offset: Vector3;
@@ -229,6 +298,9 @@ function Orb({
     if (selectionRing.current)
       selectionRing.current.quaternion.copy(camera.quaternion);
   });
+  // Selection and edit mode change the calibration color without changing any
+  // object prop, so request the frame that repaints it.
+  useEffect(() => invalidate(), [invalidate, light, selected, editable, mode]);
   useEffect(
     () => () => {
       if (drag.current) setDragging(false);
@@ -291,8 +363,9 @@ function Orb({
 
   return (
     <group position={[p.x, 0, p.z]}>
-      <mesh position={[0, p.y / 2, 0]}>
-        <cylinderGeometry args={[0.008, 0.008, p.y, 6]} />
+      {/* A unit-height stem scaled to the orb, so moves never rebuild geometry. */}
+      <mesh position={[0, p.y / 2, 0]} scale={[1, p.y, 1]}>
+        <cylinderGeometry args={[0.008, 0.008, 1, 6]} />
         <meshBasicMaterial
           color={selected ? '#ecebe0' : '#a3b1a0'}
           transparent
@@ -314,7 +387,6 @@ function Orb({
         />
       </mesh>
       <mesh
-        ref={orb}
         position={[0, p.y, 0]}
         onPointerDown={down}
         onPointerMove={move}
@@ -346,7 +418,7 @@ function Orb({
       )}
     </group>
   );
-}
+});
 
 class SceneBoundary extends Component<
   { children: ReactNode },
@@ -387,6 +459,7 @@ export function RoomScene({
     <SceneBoundary>
       <Canvas
         role="img"
+        frameloop="demand"
         orthographic
         camera={{ position: [7.4, 6.8, 9], zoom: 64, near: 0.1, far: 80 }}
         dpr={[1, 1.7]}
@@ -419,6 +492,7 @@ export function RoomScene({
           />
         ))}
         <CameraControl dragging={dragging} resetKey={resetKey} />
+        <DemandFrames output={store.output} />
       </Canvas>
     </SceneBoundary>
   );

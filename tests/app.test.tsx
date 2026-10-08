@@ -1,4 +1,11 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/App';
@@ -116,6 +123,62 @@ describe('room editing UI', () => {
     ).not.toBeInTheDocument();
     expect(renamed).toHaveAttribute('aria-pressed', 'true');
   });
+  it('limits light names to 64 UTF-8 bytes and explains a missing name inline', async () => {
+    const { user, store } = await setup();
+    await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
+    await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
+    const input = screen.getByLabelText('Name');
+    const id = store.getSnapshot().selectedLightId!;
+    const name = () =>
+      store.getSnapshot().draft!.lights.find((light) => light.id === id)!.name;
+    expect(input).not.toHaveAttribute('aria-invalid');
+    await user.clear(input);
+    expect(input).toHaveAttribute('aria-invalid', 'true');
+    expect(input).toHaveAccessibleDescription(
+      'Enter a name before saving this room.',
+    );
+    await user.type(input, '   ');
+    expect(input).toHaveAttribute('aria-invalid', 'true');
+    await user.clear(input);
+    await user.paste('灯'.repeat(30));
+    expect(name()).toBe('灯'.repeat(21));
+    expect(input).toHaveValue('灯'.repeat(21));
+    expect(input).not.toHaveAttribute('aria-invalid');
+    expect(input).not.toHaveAccessibleDescription();
+  });
+  it('keeps the card paint loop across unrelated renders and skips unchanged colors', async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((paint) => {
+      frames.push(paint);
+      return frames.length;
+    });
+    const cancel = vi
+      .spyOn(window, 'cancelAnimationFrame')
+      .mockImplementation(() => {});
+    const { user, store } = await setup();
+    await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
+    await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
+    act(() => store.selectLight(null));
+    const card = screen.getByRole('button', { name: 'Select Light 1' });
+    const cancelled = cancel.mock.calls.length;
+    const started = frames.length;
+    act(() => store.setSyncSource('display'));
+    expect(store.getSnapshot().syncSource).toBe('display');
+    expect(cancel).toHaveBeenCalledTimes(cancelled);
+    expect(frames).toHaveLength(started);
+
+    const setProperty = vi.spyOn(card.style, 'setProperty');
+    frames.at(-1)!(0);
+    frames.at(-1)!(16);
+    expect(setProperty).not.toHaveBeenCalled();
+    store.output.getColor = () => [1, 0, 0];
+    frames.at(-1)!(32);
+    expect(setProperty).toHaveBeenCalledWith('--light-color', 'rgb(255 0 0)');
+    expect(card).toHaveStyle('--light-color: rgb(255 0 0)');
+    setProperty.mockClear();
+    frames.at(-1)!(48);
+    expect(setProperty).not.toHaveBeenCalled();
+  });
   it('saves via the keyboard, marks icon edits dirty and restores the saved card on confirmed discard', async () => {
     const { user, persistence } = await setup();
     await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
@@ -139,6 +202,97 @@ describe('room editing UI', () => {
     ).toBeInTheDocument();
     expect(screen.queryByText('● UNSAVED CHANGES')).not.toBeInTheDocument();
   });
+  it('clears the selection with Escape on the page but not while editing a field', async () => {
+    const { user, store } = await setup();
+    await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
+    await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
+    const selected = store.getSnapshot().selectedLightId;
+    const name = screen.getByLabelText('Name');
+    await user.click(name);
+    await user.keyboard('{Escape}');
+    expect(store.getSnapshot().selectedLightId).toBe(selected);
+    expect(name).toHaveFocus();
+    await user.click(screen.getByLabelText('Left / right coordinate'));
+    await user.keyboard('{Escape}');
+    expect(store.getSnapshot().selectedLightId).toBe(selected);
+    screen.getByRole('button', { name: 'Select Light 1' }).focus();
+    await user.keyboard('{Escape}');
+    expect(store.getSnapshot().selectedLightId).toBeNull();
+  });
+  it('lets coordinates be typed through partial out-of-range values while the draft holds them clamped', async () => {
+    const { user, store } = await setup();
+    await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
+    await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
+    const id = store.getSnapshot().selectedLightId!;
+    const position = () =>
+      store.getSnapshot().draft!.lights.find((light) => light.id === id)!
+        .position;
+    const before = position();
+    await user.click(screen.getByRole('tab', { name: 'Height' }));
+    const height = screen.getByLabelText('Height coordinate');
+    await user.clear(height);
+    await user.type(height, '0');
+    // "0" is below the floor: kept as typed, not clamped to 0.15 mid-entry,
+    // while the draft already holds the clamped value Save would store.
+    expect(height).toHaveValue(0);
+    expect(position().y).toBe(0.15);
+    await user.type(height, '.5');
+    expect(height).toHaveValue(0.5);
+    expect(position()).toEqual({ ...before, y: 0.5 });
+    await user.tab();
+    expect(height).toHaveValue(0.5);
+
+    await user.clear(height);
+    await user.type(height, '9');
+    expect(height).toHaveValue(9);
+    expect(position().y).toBe(3);
+    await user.tab();
+    expect(position()).toEqual({ ...before, y: 3 });
+    expect(height).toHaveValue(3);
+
+    await user.clear(height);
+    await user.type(height, '0.01{Enter}');
+    expect(position().y).toBe(0.15);
+    expect(height).toHaveValue(0.15);
+    expect(height).toHaveFocus();
+    await user.clear(height);
+    await user.tab();
+    expect(height).toHaveValue(0.15);
+
+    await user.click(screen.getByRole('tab', { name: 'Location' }));
+    const x = screen.getByLabelText('Left / right coordinate');
+    await user.clear(x);
+    await user.type(x, '-1.25');
+    expect(x).toHaveValue(-1.25);
+    expect(position()).toEqual({ ...before, x: -1.25, y: 0.15 });
+  });
+  it('saves the clamped value of coordinate text that is still being typed', async () => {
+    const { user, store, persistence } = await setup();
+    await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
+    await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
+    await user.click(screen.getByRole('button', { name: /Save Room/ }));
+    const save = screen.getByRole('button', { name: /Save Room/ });
+    expect(save).toBeDisabled();
+    const x = screen.getByLabelText<HTMLInputElement>(
+      'Left / right coordinate',
+    );
+    // Replace the whole value in one keystroke, as typing over a selection does.
+    await user.type(x, '5', {
+      initialSelectionStart: 0,
+      initialSelectionEnd: x.value.length,
+    });
+    expect(x).toHaveFocus();
+    expect(save).toBeEnabled();
+    expect(screen.getByText('● UNSAVED CHANGES')).toBeInTheDocument();
+    await user.keyboard('{Control>}s{/Control}');
+    await waitFor(() => expect(store.getSnapshot().saveStatus).toBe('saved'));
+    expect(persistence.config.rooms[0].lights[0].position.x).toBe(3);
+    expect(x).toHaveValue(3);
+    await user.tab();
+    expect(x).toHaveValue(3);
+    expect(store.dirty).toBe(false);
+    expect(screen.queryByText('● UNSAVED CHANGES')).not.toBeInTheDocument();
+  });
   it('uses an accessible navigation dialog and displays failed saves with the draft intact', async () => {
     const { user, persistence } = await setup();
     await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
@@ -155,6 +309,23 @@ describe('room editing UI', () => {
     expect(
       screen.getByRole('button', { name: 'Select Light 1' }),
     ).toBeInTheDocument();
+  });
+  it('offers a keyboard-accessible close without saving after a failed close-time preference flush', async () => {
+    const { store, persistence, user } = await setup();
+    act(() => store.setPreferences({ brightness: 25 }));
+    persistence.error = new Error('Revision conflict');
+    await act(() => store.requestTransition('close'));
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('Preferences not saved. Revision conflict');
+    const escape = within(alert).getByRole('button', {
+      name: 'Close Without Saving',
+    });
+    act(() => within(alert).getByRole('button', { name: 'Retry' }).focus());
+    await user.tab();
+    expect(escape).toHaveFocus();
+    await user.keyboard('{Enter}');
+    expect(store.getSnapshot().readyToClose).toBe(true);
+    expect(persistence.config.preferences.brightness).toBe(75);
   });
 });
 
@@ -273,5 +444,35 @@ describe('physical light UI', () => {
     expect(
       screen.queryByRole('group', { name: 'Virtual lights' }),
     ).not.toBeInTheDocument();
+  });
+  it('lets Escape close the bind dialog without clearing the selection or losing focus', async () => {
+    const { user, store } = await setup({
+      available: true,
+      async preview() {},
+      async identify() {},
+      async retryDiscovery() {},
+      dispose() {},
+      async connect(receive) {
+        receive({ devices: [], outputError: null, discoveryError: null });
+      },
+    });
+    await user.click(screen.getByRole('button', { name: 'Your Rooms' }));
+    await user.click(screen.getByRole('button', { name: 'Add virtual light' }));
+    const selected = store.getSnapshot().selectedLightId;
+    const bind = screen.getByRole('button', { name: 'Bind physical light' });
+    await user.click(bind);
+    const dialog = screen.getByRole('dialog');
+    expect(
+      within(dialog).getByRole('button', { name: 'Close physical lights' }),
+    ).toHaveFocus();
+    // jsdom has no close requests: send the keydown, then the dialog's cancel.
+    await user.keyboard('{Escape}');
+    expect(store.getSnapshot().selectedLightId).toBe(selected);
+    fireEvent(dialog, new Event('cancel', { cancelable: true }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(store.getSnapshot().selectedLightId).toBe(selected);
+    expect(
+      screen.getByRole('button', { name: 'Bind physical light' }),
+    ).toHaveFocus();
   });
 });

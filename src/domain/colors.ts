@@ -29,8 +29,6 @@ export function calibrationColor(light: VirtualLight, mode: EditMode): RGB {
     (light.position[axis] - min) / (max - min),
   );
 }
-export const scaleColor = (color: RGB, brightness: number): RGB =>
-  color.map((c) => (c * brightness) / 100) as unknown as RGB;
 export const colorCss = (color: RGB): string =>
   `rgb(${color.map((c) => Math.round(c * 255)).join(' ')})`;
 
