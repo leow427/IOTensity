@@ -3,6 +3,7 @@
 // validation and lifecycle races using real CoreMedia samples.
 #import "../src/sync/capture.m"
 #import <assert.h>
+#import <string.h>
 
 static CMSampleBufferRef statusSample(NSNumber *status) {
     CMSampleBufferRef sample = NULL;
@@ -97,6 +98,40 @@ int main(void) {
         int stoppedState = state(cancelled);
         assert(stoppedState == 2 || stoppedState == 3);
         CFRelease(bad);
+
+        // Permission and a stop chosen in macOS are final; other errors retry.
+        NSError *declined = [NSError errorWithDomain:SCStreamErrorDomain code:SCStreamErrorUserDeclined userInfo:nil];
+        NSError *userStopped = [NSError errorWithDomain:SCStreamErrorDomain code:SCStreamErrorUserStopped userInfo:nil];
+        NSError *internal = [NSError errorWithDomain:SCStreamErrorDomain code:SCStreamErrorInternalError userInfo:nil];
+        for (NSError *error in @[declined, userStopped, internal]) {
+            IOCapture *capture = [IOCapture new];
+            [capture setState:1 message:nil];
+            [capture failWithError:error fallback:@"Fallback."];
+            int expected = error == internal ? 4 : 5;
+            assert(state(capture) == expected);
+            [capture setState:1 message:nil]; // A late start completion cannot revive it.
+            [capture fail:@"Later transient error."];
+            CMSampleBufferRef late = statusSample(@99);
+            deliver(capture, late);
+            CFRelease(late);
+            assert(state(capture) == expected);
+        }
+        IOCapture *missing = [IOCapture new];
+        [missing failWithError:nil fallback:@"Fallback."];
+        char missingMessage[1024];
+        assert([missing stateWithMessage:missingMessage capacity:sizeof(missingMessage)] == 4);
+        assert(strcmp(missingMessage, "Fallback.") == 0);
+
+        // The GPU-scaled capture keeps the display's aspect and never upscales.
+        struct { double width, height; size_t expectedWidth, expectedHeight; } sizes[] = {
+            {5120, 2880, 1024, 576}, {6016, 3384, 1024, 576}, {3024, 1964, 1024, 665},
+            {1080, 1920, 576, 1024}, {3440, 1440, 1024, 429}, {800, 600, 800, 600}, {0, 0, 1, 1},
+        };
+        for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+            size_t width = 0, height = 0;
+            captureSize(sizes[i].width, sizes[i].height, 1024, &width, &height);
+            assert(width == sizes[i].expectedWidth && height == sizes[i].expectedHeight);
+        }
 
         IOCapture *audio = [IOCapture new];
         [audio setState:1 message:nil];

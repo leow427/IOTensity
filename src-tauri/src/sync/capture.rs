@@ -1,9 +1,12 @@
-use super::{processing::AnalysisImage, DisplayUpdate};
+use super::{
+    processing::{AnalysisImage, CAPTURE_MAX_SIDE},
+    DisplayUpdate,
+};
 use std::ffi::{c_char, c_void, CStr};
 use std::time::Duration;
 
 unsafe extern "C" {
-    fn io_capture_start() -> *mut c_void;
+    fn io_capture_start(max_side: usize) -> *mut c_void;
     fn io_capture_stop(handle: *mut c_void);
     fn io_capture_state(handle: *mut c_void, message: *mut c_char, capacity: usize) -> i32;
     fn io_capture_poll(
@@ -23,7 +26,7 @@ unsafe extern "C" {
 pub struct Capture(*mut c_void);
 impl Capture {
     pub fn start() -> Self {
-        Self(unsafe { io_capture_start() })
+        Self(unsafe { io_capture_start(CAPTURE_MAX_SIDE) })
     }
     pub fn stop(&self) {
         unsafe { io_capture_stop(self.0) }

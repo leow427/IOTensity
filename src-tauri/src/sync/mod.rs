@@ -58,6 +58,8 @@ struct Runtime {
     shutdown: bool,
     reduced_motion: bool,
     simulation: crate::hardware::engine::Simulation,
+    #[cfg(any(target_os = "macos", test))]
+    capture_retry: Option<CaptureRetry>,
 }
 
 impl Runtime {
@@ -117,7 +119,7 @@ impl Runtime {
     ) -> bool {
         let (status, message) = match native {
             None | Some((3, _)) => (Status::Stopped, String::new()),
-            Some((4, message)) => (Status::Error, message),
+            Some((4 | 5, message)) => (Status::Error, message),
             Some(_) if now.saturating_duration_since(since) >= CAPTURE_STOP_TIMEOUT => (
                 Status::Error,
                 "Display capture did not confirm that it stopped. Start again to retry, or restart IOTensity if the screen recording indicator remains.".into(),
@@ -145,6 +147,43 @@ struct DisplayUpdate {
     frame: Option<Result<processing::AnalysisImage, String>>,
 }
 
+// A transient capture failure (stall, Blank, Suspended, Stopped, a stream or
+// frame error) releases the capture and starts a new one while Sync remains
+// requested. Physical output is off until the new capture's first Complete
+// frame; virtual colors hold. Native state 5 marks failures only the user can
+// fix (permission, a stop chosen in macOS), which end in Error instead.
+#[cfg(any(target_os = "macos", test))]
+struct CaptureRetry {
+    failures: u32,
+    failed_at: Instant,
+    retry_at: Instant,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl CaptureRetry {
+    const FIRST: Duration = Duration::from_millis(500);
+    const MAX: Duration = Duration::from_secs(5);
+    /// Failures further apart than this restart the backoff from `FIRST`.
+    const RESET: Duration = Duration::from_secs(30);
+
+    fn after(previous: Option<&Self>, now: Instant) -> Self {
+        let failures = match previous {
+            Some(previous) if now.saturating_duration_since(previous.failed_at) < Self::RESET => {
+                previous.failures.saturating_add(1)
+            }
+            _ => 1,
+        };
+        let delay = Self::FIRST
+            .saturating_mul(1 << (failures - 1).min(4))
+            .min(Self::MAX);
+        Self {
+            failures,
+            failed_at: now,
+            retry_at: now + delay,
+        }
+    }
+}
+
 #[cfg(any(target_os = "macos", test))]
 impl Runtime {
     fn wants_display_frame(&self) -> bool {
@@ -152,60 +191,77 @@ impl Runtime {
             && matches!(self.snapshot.status, Status::Starting | Status::Running)
     }
 
+    /// Whether to poll the capture this tick, creating it if needed. A capture
+    /// released after a transient failure is recreated after its retry delay.
+    fn wants_capture(&self, now: Instant) -> bool {
+        self.wants_display_frame()
+            && self
+                .capture_retry
+                .as_ref()
+                .is_none_or(|retry| now >= retry.retry_at)
+    }
+
     // Applies a poll that was decoded without the runtime lock. A Stop or
     // shutdown that took the lock meanwhile wins and discards the stale frame;
     // a source started meanwhile waits for its own first Complete frame.
-    fn apply_display_poll(&mut self, update: Option<DisplayUpdate>) {
-        if let Some(update) = update.filter(|_| self.wants_display_frame()) {
-            self.update_display(update);
-        }
+    // Returns true when the capture handle must be released.
+    fn apply_display_poll(&mut self, update: Option<DisplayUpdate>, now: Instant) -> bool {
+        update
+            .filter(|_| self.wants_display_frame())
+            .is_some_and(|update| self.update_display(update, now))
     }
 
-    fn update_display(&mut self, update: DisplayUpdate) {
+    // Returns true when the capture handle must be released.
+    fn update_display(&mut self, update: DisplayUpdate, now: Instant) -> bool {
+        if update.state == 5 {
+            self.capture_retry = None;
+            self.snapshot.status = Status::Error;
+            self.snapshot.message = update.message;
+            self.processor.image = None;
+            return true;
+        }
         // A retained explicit Idle state authorizes repetition until a later
         // status/delegate event. It does not promise another callback soon.
         let idle = update.frame_status == 1;
-        let failure = if update.state == 4 {
-            Some(update.message)
+        let reason = if update.state == 4 {
+            update.message
         } else if matches!(update.state, 2 | 3) {
-            Some("Display capture stopped. Restart capture to resume.".into())
+            "Display capture stopped.".into()
         } else if matches!(update.frame_status, 2 | 3 | 5) {
-            Some(
-                match update.frame_status {
-                    2 => "The display is blank. Restart capture when the display is available.",
-                    3 => "Display capture is suspended. Restart capture to resume.",
-                    _ => "Display capture stopped. Restart capture to resume.",
-                }
-                .into(),
-            )
+            match update.frame_status {
+                2 => "The display is blank.",
+                3 => "Display capture is suspended.",
+                _ => "Display capture stopped.",
+            }
+            .into()
         } else if !idle
             && self.snapshot.status == Status::Running
             && update
                 .activity_age
                 .is_some_and(|age| age >= crate::hardware::STALL_TIMEOUT)
         {
-            Some("Display capture stopped responding. Restart capture to resume.".into())
+            "Display capture stopped responding.".into()
         } else {
-            None
-        };
-        if let Some(message) = failure {
-            self.snapshot.status = Status::Error;
-            self.snapshot.message = message;
-            self.processor.image = None;
-        } else if let Some(frame) = update.frame {
-            match frame {
-                Ok(image) => {
+            match update.frame {
+                Some(Ok(image)) => {
                     self.processor.image = Some(image);
                     self.snapshot.status = Status::Running;
                     self.snapshot.message = "Main display".into();
+                    return false;
                 }
-                Err(error) => {
-                    self.snapshot.status = Status::Error;
-                    self.snapshot.message = error;
-                    self.processor.image = None;
-                }
+                Some(Err(error)) => error,
+                None => return false,
             }
-        }
+        };
+        self.capture_retry = Some(CaptureRetry::after(self.capture_retry.as_ref(), now));
+        self.snapshot.status = Status::Starting;
+        self.snapshot.message = if reason.is_empty() {
+            "Reconnecting display capture…".into()
+        } else {
+            format!("{reason} Reconnecting…")
+        };
+        self.processor.image = None;
+        true
     }
 }
 
@@ -226,9 +282,9 @@ impl SyncService {
                 let now = Instant::now();
                 let dt = now.duration_since(last).as_secs_f32();
                 last = now;
-                // Decoding a full-resolution frame touches every pixel, so it
-                // runs without the runtime lock: Stop, start, snapshots, saves
-                // and shutdown never wait behind it.
+                // Decoding touches every captured pixel, so it runs without the
+                // runtime lock: Stop, start, snapshots, saves and shutdown never
+                // wait behind it.
                 #[cfg(target_os = "macos")]
                 let update = {
                     let wanted = {
@@ -236,7 +292,7 @@ impl SyncService {
                         if rt.shutdown {
                             break;
                         }
-                        rt.wants_display_frame()
+                        rt.wants_capture(now)
                     };
                     wanted.then(|| capture.get_or_insert_with(capture::Capture::start).poll())
                 };
@@ -252,8 +308,10 @@ impl SyncService {
                             } else {
                                 #[cfg(target_os = "macos")]
                                 {
-                                    rt.apply_display_poll(update);
-                                    if rt.snapshot.status == Status::Error {
+                                    // Dropping stops the native stream. After a
+                                    // transient failure, wants_capture starts a
+                                    // new one once its retry delay has passed.
+                                    if rt.apply_display_poll(update, now) {
                                         capture = None;
                                     }
                                 }
@@ -291,12 +349,16 @@ impl SyncService {
                     }
                     rt.snapshot.clone()
                 };
-                hardware.publish_at(&snapshot.colors, snapshot.status == Status::Running, now);
+                // Stamped as it is sent, after any decode: the hardware watchdog
+                // bounds the gap between publishes, which is one tick long.
+                hardware.publish(&snapshot.colors, snapshot.status == Status::Running);
                 if snapshot.sequence != last_emitted {
                     last_emitted = snapshot.sequence;
                     let _ = app.emit("sync-output", snapshot);
                 }
-                thread::sleep(OUTPUT_INTERVAL); // Never catch up with a burst after a slow frame.
+                // Ticks start OUTPUT_INTERVAL apart. A slow tick is followed at
+                // once by the next one, never by a burst of catch-up ticks.
+                thread::sleep(OUTPUT_INTERVAL.saturating_sub(now.elapsed()));
             }
         });
     }
@@ -346,6 +408,10 @@ impl SyncService {
         rt.snapshot.source = source;
         rt.snapshot.status = Status::Starting;
         rt.processor.image = None;
+        #[cfg(any(target_os = "macos", test))]
+        {
+            rt.capture_retry = None;
+        }
         rt.snapshot.message = match source {
             Source::Simulation | Source::Test => "Starting…",
             Source::Display => "Starting capture… Allow Screen Recording if prompted.",
@@ -402,23 +468,37 @@ mod tests {
     #[test]
     fn cached_display_polls_do_not_renew_the_source_watchdog() {
         let service = configured(Source::Display);
+        let now = Instant::now();
         let mut rt = service.inner.lock().unwrap();
-        rt.update_display(display_update(0, 0, true));
+        assert!(!rt.update_display(display_update(0, 0, true), now));
         rt.render(0.033);
         let held = rt.snapshot.colors.clone();
         assert!(!held.is_empty());
         for age_ms in [33, 100, 249] {
-            rt.update_display(display_update(0, age_ms, false));
+            assert!(!rt.update_display(display_update(0, age_ms, false), now));
             rt.render(0.033);
             assert_eq!(rt.snapshot.status, Status::Running);
             assert_eq!(rt.snapshot.colors, held);
         }
-        rt.update_display(display_update(0, 250, false));
+        // The stalled capture is released for a restart while Sync stays requested.
+        assert!(rt.update_display(display_update(0, 250, false), now));
         rt.render(0.033);
-        assert_eq!(rt.snapshot.status, Status::Error);
+        assert_eq!(rt.snapshot.status, Status::Starting);
+        assert_eq!(
+            rt.snapshot.message,
+            "Display capture stopped responding. Reconnecting…"
+        );
         assert!(rt.processor.image.is_none());
         assert_eq!(rt.snapshot.colors, held); // Virtual colors hold; physical output stops.
         drop(rt);
+        // Stop still ends a recovering source, after which another can start.
+        assert!(service.start(Source::Test).is_err());
+        assert_eq!(service.stop().status, Status::Stopping);
+        assert!(service
+            .inner
+            .lock()
+            .unwrap()
+            .update_stopping(None, now, now));
         assert_eq!(
             service.start(Source::Test).unwrap().status,
             Status::Starting
@@ -446,7 +526,7 @@ mod tests {
                 last_capture = now;
             }
             let age = now.duration_since(last_capture).as_millis() as u64;
-            rt.update_display(display_update(0, age, fresh));
+            rt.update_display(display_update(0, age, fresh), now);
             rt.render(OUTPUT_INTERVAL.as_secs_f32());
             assert_eq!(rt.snapshot.status, Status::Running);
             hardware.publish_at(&rt.snapshot.colors, true, now);
@@ -462,7 +542,7 @@ mod tests {
         while rt.snapshot.status == Status::Running {
             assert!(now <= deadline);
             let age = now.duration_since(last_capture).as_millis() as u64;
-            rt.update_display(display_update(0, age, false));
+            rt.update_display(display_update(0, age, false), now);
             rt.render(OUTPUT_INTERVAL.as_secs_f32());
             hardware.publish_at(
                 &rt.snapshot.colors,
@@ -471,7 +551,7 @@ mod tests {
             );
             now += OUTPUT_INTERVAL;
         }
-        assert_eq!(rt.snapshot.status, Status::Error);
+        assert_eq!(rt.snapshot.status, Status::Starting); // Recovering, output off.
         let (running, epoch) = hardware.expire_at(now);
         assert!(!running);
         assert_eq!(epoch, running_epoch.unwrap() + 1);
@@ -480,12 +560,13 @@ mod tests {
     #[test]
     fn fresh_idle_samples_and_static_test_source_repeat_without_pixel_changes() {
         let service = configured(Source::Display);
+        let now = Instant::now();
         let mut rt = service.inner.lock().unwrap();
-        rt.update_display(display_update(0, 0, true));
+        rt.update_display(display_update(0, 0, true), now);
         rt.render(0.033);
         let held = rt.snapshot.colors.clone();
         for _ in 0..3 {
-            rt.update_display(display_update(1, 0, false));
+            assert!(!rt.update_display(display_update(1, 0, false), now));
             rt.render(0.033);
             assert_eq!(rt.snapshot.status, Status::Running);
             assert_eq!(rt.snapshot.colors, held);
@@ -502,51 +583,181 @@ mod tests {
     }
 
     #[test]
-    fn blank_suspended_stopped_and_failed_samples_stop_output_and_release_image() {
-        for frame_status in [2, 3, 5] {
+    fn blank_suspended_stopped_and_failed_samples_stop_output_and_restart_capture() {
+        let now = Instant::now();
+        for (frame_status, reason) in [
+            (2, "The display is blank."),
+            (3, "Display capture is suspended."),
+            (5, "Display capture stopped."),
+        ] {
             let service = configured(Source::Display);
             let mut rt = service.inner.lock().unwrap();
-            rt.update_display(display_update(0, 0, true));
+            rt.update_display(display_update(0, 0, true), now);
             rt.render(0.033);
             let held = rt.snapshot.colors.clone();
-            rt.update_display(display_update(1, 60_000, false));
+            rt.update_display(display_update(1, 60_000, false), now);
             assert_eq!(rt.snapshot.status, Status::Running);
             // Even a pending old Complete buffer cannot override these statuses.
-            rt.update_display(display_update(frame_status, 0, true));
+            assert!(rt.update_display(display_update(frame_status, 0, true), now));
             rt.render(0.033);
-            assert_eq!(rt.snapshot.status, Status::Error);
+            assert_eq!(rt.snapshot.status, Status::Starting);
+            assert_eq!(rt.snapshot.message, format!("{reason} Reconnecting…"));
             assert!(rt.processor.image.is_none());
             assert_eq!(rt.snapshot.colors, held);
         }
-        for failed_decode in [false, true] {
+        for (state, native, decode, message) in [
+            (4, "Capture failed.", None, "Capture failed. Reconnecting…"),
+            (4, "", None, "Reconnecting display capture…"),
+            (
+                1,
+                "",
+                Some("Invalid frame."),
+                "Invalid frame. Reconnecting…",
+            ),
+        ] {
             let service = configured(Source::Display);
             let mut update = display_update(0, 0, true);
-            if failed_decode {
-                update.frame = Some(Err("Invalid frame".into()));
-            } else {
-                update.state = 4;
-                update.message = "Capture failed".into();
+            update.state = state;
+            update.message = native.into();
+            if let Some(error) = decode {
+                update.frame = Some(Err(error.into()));
             }
             let mut rt = service.inner.lock().unwrap();
-            rt.update_display(update);
-            assert_eq!(rt.snapshot.status, Status::Error);
+            assert!(rt.update_display(update, now));
+            assert_eq!(rt.snapshot.status, Status::Starting);
+            assert_eq!(rt.snapshot.message, message);
             assert!(rt.processor.image.is_none());
         }
     }
 
     #[test]
+    fn transient_capture_failures_retry_with_bounded_backoff_then_resume() {
+        let service = configured(Source::Display);
+        let start = Instant::now();
+        let mut rt = service.inner.lock().unwrap();
+        assert!(rt.wants_capture(start)); // A new source captures at once.
+        rt.update_display(display_update(0, 0, true), start);
+        rt.render(0.033);
+        assert_eq!(rt.snapshot.status, Status::Running);
+        let mut now = start;
+        for delay_ms in [500, 1_000, 2_000, 4_000, 5_000, 5_000] {
+            // Each failure releases the capture; the next waits out its delay.
+            assert!(rt.update_display(display_update(2, 0, false), now));
+            let delay = Duration::from_millis(delay_ms);
+            assert!(!rt.wants_capture(now + delay - Duration::from_millis(1)));
+            assert!(rt.wants_capture(now + delay));
+            now += delay;
+            // A restarted capture with no frame yet keeps output off.
+            assert!(!rt.update_display(display_update(-1, 0, false), now));
+            rt.render(0.033);
+            assert_eq!(rt.snapshot.status, Status::Starting);
+        }
+        // The first Complete frame from the new capture resumes output.
+        assert!(!rt.update_display(display_update(0, 0, true), now));
+        rt.render(0.033);
+        assert_eq!(rt.snapshot.status, Status::Running);
+        assert_eq!(rt.snapshot.message, "Main display");
+        assert!(rt.processor.image.is_some());
+        // A failure long after the previous one starts the backoff again.
+        now += CaptureRetry::RESET;
+        assert!(rt.update_display(display_update(0, 250, false), now));
+        assert!(!rt.wants_capture(now + CaptureRetry::FIRST - Duration::from_millis(1)));
+        assert!(rt.wants_capture(now + CaptureRetry::FIRST));
+        drop(rt);
+        // Stop during a retry delay ends Sync; a new start captures at once.
+        assert_eq!(service.stop().status, Status::Stopping);
+        assert!(!service.inner.lock().unwrap().wants_capture(now));
+        assert!(service
+            .inner
+            .lock()
+            .unwrap()
+            .update_stopping(None, now, now));
+        service.start(Source::Display).unwrap();
+        assert!(service.inner.lock().unwrap().wants_capture(now));
+    }
+
+    #[test]
+    fn permanent_capture_failures_end_in_error_without_a_restart() {
+        let service = configured(Source::Display);
+        let now = Instant::now();
+        let mut rt = service.inner.lock().unwrap();
+        rt.update_display(display_update(0, 0, true), now);
+        rt.render(0.033);
+        let held = rt.snapshot.colors.clone();
+        // A transient failure first, then one only the user can fix.
+        assert!(rt.update_display(display_update(0, 250, false), now));
+        let mut update = display_update(-1, 0, false);
+        update.state = 5;
+        update.message =
+            "Screen recording was stopped in macOS. Start Sync again to resume.".into();
+        assert!(rt.update_display(update, now));
+        rt.render(0.033);
+        assert_eq!(rt.snapshot.status, Status::Error);
+        assert_eq!(
+            rt.snapshot.message,
+            "Screen recording was stopped in macOS. Start Sync again to resume."
+        );
+        assert!(rt.processor.image.is_none());
+        assert_eq!(rt.snapshot.colors, held);
+        assert!(!rt.wants_capture(now + Duration::from_secs(60)));
+        drop(rt);
+        // Only a new start captures again, at once.
+        service.start(Source::Display).unwrap();
+        assert!(service.inner.lock().unwrap().wants_capture(now));
+    }
+
+    #[test]
+    fn slow_ticks_below_the_stall_bound_keep_physical_output_streaming() {
+        // Models the output loop: a tick starts OUTPUT_INTERVAL after the previous
+        // start (at once after a slow tick), works, then publishes stamped when
+        // sent. Only a single tick of STALL_TIMEOUT or more can stop output.
+        let colors = vec![LightColor {
+            id: "light".into(),
+            rgb: [1, 2, 3],
+        }];
+        let start = Instant::now();
+        for work_ms in [5, 120, 200, 249] {
+            let hardware = crate::hardware::HardwareService::detached();
+            let work = Duration::from_millis(work_ms);
+            let mut tick = start;
+            hardware.publish_at(&colors, true, tick + work);
+            let (_, epoch) = hardware.expire_at(tick + work);
+            for _ in 0..20 {
+                let next_tick = tick + work.max(OUTPUT_INTERVAL);
+                let next_publish = next_tick + work;
+                // The output thread may check at any moment before the next publish.
+                let mut at = tick + work;
+                while at < next_publish {
+                    assert_eq!(hardware.expire_at(at), (true, epoch), "{work_ms} ms ticks");
+                    at += Duration::from_millis(5);
+                }
+                hardware.publish_at(&colors, true, next_publish);
+                tick = next_tick;
+            }
+        }
+        let hardware = crate::hardware::HardwareService::detached();
+        hardware.publish_at(&colors, true, start);
+        let (_, epoch) = hardware.expire_at(start);
+        assert_eq!(
+            hardware.expire_at(start + crate::hardware::STALL_TIMEOUT),
+            (false, epoch + 1)
+        );
+    }
+
+    #[test]
     fn startup_waits_for_first_image_without_treating_start_ack_as_a_frame() {
         let service = configured(Source::Display);
+        let now = Instant::now();
         let mut rt = service.inner.lock().unwrap();
         for (status, age) in [(-1, 0), (-1, 250), (4, 1_000), (1, 60_000)] {
-            rt.update_display(display_update(status, age, false));
+            assert!(!rt.update_display(display_update(status, age, false), now));
             rt.render(0.033);
             assert_eq!(rt.snapshot.status, Status::Starting);
             assert!(rt.snapshot.colors.is_empty());
         }
         // Start completion has no API deadline for the first Complete frame;
         // no physical output is requested before that frame arrives.
-        rt.update_display(display_update(0, 0, true));
+        rt.update_display(display_update(0, 0, true), now);
         rt.render(0.033);
         assert_eq!(rt.snapshot.status, Status::Running);
         assert!(!rt.snapshot.colors.is_empty());
@@ -555,21 +766,22 @@ mod tests {
     #[test]
     fn explicit_idle_persists_without_a_callback_heartbeat_but_can_be_invalidated() {
         let service = configured(Source::Display);
+        let now = Instant::now();
         let mut rt = service.inner.lock().unwrap();
-        rt.update_display(display_update(0, 0, true));
+        rt.update_display(display_update(0, 0, true), now);
         rt.render(0.033);
         let held = rt.snapshot.colors.clone();
         for elapsed in [33, 250, 1_000, 60_000] {
-            rt.update_display(display_update(1, elapsed, false));
+            assert!(!rt.update_display(display_update(1, elapsed, false), now));
             rt.render(0.033);
             assert_eq!(rt.snapshot.status, Status::Running);
             assert_eq!(rt.snapshot.colors, held);
         }
         // Once new content is declared, missing source progress is subject to
         // the 250 ms watchdog again. Idle is not a permanently latched exemption.
-        rt.update_display(display_update(0, 0, true));
-        rt.update_display(display_update(0, 250, false));
-        assert_eq!(rt.snapshot.status, Status::Error);
+        rt.update_display(display_update(0, 0, true), now);
+        assert!(rt.update_display(display_update(0, 250, false), now));
+        assert_eq!(rt.snapshot.status, Status::Starting);
     }
 
     #[test]
@@ -579,9 +791,10 @@ mod tests {
         // The output thread decodes here without the runtime lock, so Stop wins it.
         let decoded = display_update(0, 0, true);
         assert_eq!(service.stop().status, Status::Stopping);
+        let now = Instant::now();
         let mut rt = service.inner.lock().unwrap();
         assert!(!rt.wants_display_frame());
-        rt.apply_display_poll(Some(decoded));
+        assert!(!rt.apply_display_poll(Some(decoded), now));
         assert_eq!(rt.snapshot.status, Status::Stopping);
         assert!(rt.processor.image.is_none());
         rt.snapshot.status = Status::Stopped;
@@ -592,10 +805,10 @@ mod tests {
             Status::Starting
         );
         let mut rt = service.inner.lock().unwrap();
-        rt.apply_display_poll(None);
+        assert!(!rt.apply_display_poll(None, now));
         assert_eq!(rt.snapshot.status, Status::Starting);
         assert!(rt.processor.image.is_none());
-        rt.apply_display_poll(Some(display_update(0, 0, true)));
+        assert!(!rt.apply_display_poll(Some(display_update(0, 0, true)), now));
         assert_eq!(rt.snapshot.status, Status::Running);
         assert!(rt.processor.image.is_some());
     }
@@ -610,6 +823,11 @@ mod tests {
                 Some((4, "Could not stop".into())),
                 Status::Error,
                 "Could not stop",
+            ),
+            (
+                Some((5, "Permission revoked".into())),
+                Status::Error,
+                "Permission revoked",
             ),
         ] {
             let service = configured(Source::Display);
@@ -626,7 +844,7 @@ mod tests {
         let now = Instant::now();
         {
             let mut rt = service.inner.lock().unwrap();
-            rt.update_display(display_update(0, 0, true));
+            rt.update_display(display_update(0, 0, true), now);
             rt.render(0.033);
         }
         let held = service.snapshot().colors;
@@ -725,7 +943,7 @@ mod tests {
             service.start(source).unwrap();
             let mut rt = service.inner.lock().unwrap();
             if source == Source::Display {
-                rt.update_display(display_update(0, 0, true));
+                rt.update_display(display_update(0, 0, true), Instant::now());
             } else {
                 rt.update_local_source();
             }

@@ -24,9 +24,9 @@ use std::{
 
 pub const SERVICE: &str = "_iotensity._tcp.local.";
 pub const FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 30 + 1);
-/// Shared 250 ms stall bound. Hardware applies it to publish ticks; sync applies
-/// it to capture progress. Each is measured where it is observed, so a source
-/// gap that sync still accepts can never expire output between ticks.
+/// Shared 250 ms stall bound. Hardware applies it to the gap between publishes;
+/// sync applies it to capture progress. Each is measured where it is observed,
+/// so a source gap that sync still accepts can never expire output between ticks.
 pub const STALL_TIMEOUT: Duration = Duration::from_millis(250);
 /// Pause before recreating an mDNS daemon that could not be created or browse.
 const DISCOVERY_RETRY_DELAY: Duration = Duration::from_secs(2);
@@ -472,8 +472,9 @@ impl HardwareService {
     pub fn publish(&self, colors: &[crate::sync::processing::LightColor], running: bool) {
         self.publish_at(colors, running, Instant::now());
     }
-    /// `published_at` is the publisher's tick time, not capture age: source
-    /// progress is judged by sync, and this watchdog bounds publisher stalls.
+    /// `published_at` is when these colors were sent, after any frame decode, not
+    /// capture age: source progress is judged by sync, and this watchdog bounds
+    /// publisher stalls. A start-of-tick time would charge a decode twice.
     pub fn publish_at(
         &self,
         colors: &[crate::sync::processing::LightColor],
